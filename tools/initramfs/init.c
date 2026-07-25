@@ -32,8 +32,36 @@
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
 #include <linux/random.h>
+#include <dirent.h>
 #include <errno.h>
 
+
+// ─── Directory listing helper for diagnostics ──────────────────────
+// Lists up to `max_entries` entries from a directory to standard output.
+static void ls_dir(const char *path, int max_entries) {
+    DIR *d = opendir(path);
+    if (!d) {
+        char buf[128];
+        int n = snprintf(buf, sizeof(buf), "  ls(%s): opendir failed errno=%d\n", path, errno);
+        syscall(SYS_write, STDOUT_FILENO, buf, (size_t)(n < (int)sizeof(buf) ? n : sizeof(buf) - 1));
+        return;
+    }
+    char buf[4096];
+    int count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL && count < max_entries) {
+        char ftype = '?';
+        if (entry->d_type == DT_DIR) ftype = 'd';
+        else if (entry->d_type == DT_REG) ftype = 'f';
+        else if (entry->d_type == DT_LNK) ftype = 'l';
+        else if (entry->d_type == DT_CHR) ftype = 'c';
+        else if (entry->d_type == DT_BLK) ftype = 'b';
+        int n = snprintf(buf, sizeof(buf), "  %c %s\n", ftype, entry->d_name);
+        if (n > 0) syscall(SYS_write, STDOUT_FILENO, buf, (size_t)(n < (int)sizeof(buf) ? n : sizeof(buf) - 1));
+        count++;
+    }
+    closedir(d);
+}
 
 // ─── Shared memory layout (matches host's CMD_BUF/OUT_BUF) ──────────
 #define ENTROPY_BUF_PHYS 0x7D000ULL  // host writes 64B CSPRNG before each KVM_RUN
@@ -112,6 +140,14 @@ static char *run_python(const char *code, const char *python) {
         if (stdout_pipe[1] > STDERR_FILENO) close(stdout_pipe[1]);
 
         // ── FILE VERIFICATION DIAGNOSTICS ──
+        // Dump rootfs contents for debugging
+        syscall(SYS_write, STDOUT_FILENO, "ROOTFS_DUMP:\n", 13);
+        ls_dir("/", 40);
+        syscall(SYS_write, STDOUT_FILENO, "BIN_DUMP:\n", 10);
+        ls_dir("/bin", 40);
+        syscall(SYS_write, STDOUT_FILENO, "LIB64_DUMP:\n", 12);
+        ls_dir("/lib64", 20);
+
         // Verify /bin/python3 exists and is accessible
         struct stat py_stat;
         int py_exists = (stat("/bin/python3", &py_stat) == 0);

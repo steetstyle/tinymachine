@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! tinymachine exec --lang python 'print(1)'
-//! tinymachine exec --lang wasm '(+ 1 2)'
+//! tinymachine exec --lang wasm '(module (func (export "_start")))'
 //! tinymachine template build python --variant minimal
 //! tinymachine template list
 //! tinymachine version

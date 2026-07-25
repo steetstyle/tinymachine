@@ -14,6 +14,7 @@ serde_json.workspace = true
 toml.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 libc.workspace = true
 
 wasmtime = { version = "28", default-features = false, features = ["cranelift", "runtime", "wat", "pooling-allocator"], optional = true }
@@ -77,3 +78,7 @@ harness = false
 name = "kvm_backend_lifecycle"
 path = "benches/kvm_backend_lifecycle.rs"
 harness = false
+
+[[bin]]
+name = "build-snapshot"
+path = "src/bin/build_snapshot.rs"

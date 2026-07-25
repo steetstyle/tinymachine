@@ -1120,7 +1120,7 @@ impl BootedVm {
                 // Our timeout thread sent SIGUSR1 — guest didn't write READY in time.
                 let serial_str = String::from_utf8_lossy(&serial_output);
                 let _ = std::fs::write("/tmp/tinyos-boot-serial.log", &serial_output);
-                eprintln!("TIMEOUT_DEBUG: entered timeout handler");
+                tracing::warn!("TIMEOUT: entered timeout handler");
 
                 // Dump OUT_BUF content (diagnostic messages from init)
                 let out_buf_start = OUT_BUF_PHYS as usize;
@@ -1146,7 +1146,7 @@ impl BootedVm {
                         String::from_utf8_lossy(&s[..end])
                     })
                     .unwrap_or_default();
-                eprintln!("TIMEOUT_DEBUG: out_str={:?}", out_str);
+                tracing::debug!("TIMEOUT_DEBUG: out_str={out_str:?}");
 
                 // Dump CMD_BUF content
                 let cmd_buf_start = CMD_BUF_PHYS as usize;
@@ -1162,12 +1162,14 @@ impl BootedVm {
                 } else {
                     "".into()
                 };
-                eprintln!("TIMEOUT_DEBUG: cmd_str={:?}", cmd_str);
+                tracing::debug!("TIMEOUT_DEBUG: cmd_str={cmd_str:?}");
 
-                eprintln!("TIMEOUT: Full serial output ({} chars):\n{}",
-                    serial_output.len(), serial_str);
-                eprintln!("TIMEOUT: OUT_BUF content: {:?}", out_str);
-                eprintln!("TIMEOUT: CMD_BUF content: {:?}", cmd_str);
+                tracing::warn!(
+                    "TIMEOUT: Full serial output ({} chars):\n{}",
+                    serial_output.len(), serial_str
+                );
+                tracing::warn!("TIMEOUT: OUT_BUF content: {out_str:?}");
+                tracing::warn!("TIMEOUT: CMD_BUF content: {cmd_str:?}");
                 return Err(BootError::GuestExit(format!(
                     "timeout waiting for READY\n=== serial output ({} chars) ===\n{}\n=== OUT_BUF ===\n{}\n=== CMD_BUF ===\n{}\nTIMEOUT_DEBUG: done",
                     serial_output.len(), serial_str, out_str, cmd_str
@@ -1217,9 +1219,11 @@ impl BootedVm {
                             String::from_utf8_lossy(&s[..end])
                         }
                     } else { "".into() };
-                    eprintln!("TIMEOUT: Full serial output ({} chars):\n{}",
-                        serial_output.len(), serial_str);
-                    eprintln!("TIMEOUT: OUT_BUF=[{:?}] CMD_BUF=[{:?}]", out_str, cmd_str);
+                    tracing::warn!(
+                        "TIMEOUT: Full serial output ({} chars):\n{}",
+                        serial_output.len(), serial_str
+                    );
+                    tracing::warn!("TIMEOUT: OUT_BUF=[{out_str:?}] CMD_BUF=[{cmd_str:?}]");
                     return Err(BootError::GuestExit(format!(
                         "timeout waiting for READY\n=== serial output ({} chars) ===\n{}\n=== OUT_BUF ===\n{}\n=== CMD_BUF ===\n{}",
                         serial_output.len(), serial_str, out_str, cmd_str
@@ -1358,7 +1362,7 @@ impl BootedVm {
                     if (0x40..=0x43).contains(&port) || (0x20..=0x21).contains(&port) || (0xA0..=0xA1).contains(&port) || port == 0x61 || port == 0x87 {
                         let d = if direction == 0 { "IN " } else { "OUT" };
                         let v = read_data(size);
-                        eprintln!("IO_PIT_PIC[{io_count}]: {d} port=0x{port:04x} val=0x{v:x} sz={size}");
+                        tracing::trace!("IO_PIT_PIC[{io_count}]: {d} port=0x{port:04x} val=0x{v:x} sz={size}");
                     }
                     // Periodic progress log every 1000 IO events
                     if io_count.is_multiple_of(1000) || io_count <= 20 {
@@ -3158,12 +3162,11 @@ pub unsafe fn boot_linux(kvm: &Kvm, config: &BootConfig) -> Result<BootedVm> {
     // Debug: print initial SREGS values (test-only diagnostic)
     #[cfg(debug_assertions)]
     {
-        use std::io::Write;
-        let _ = std::io::stderr().write_fmt(format_args!(
-            "DEBUG boot: KVM_GET_SREGS initial: cr0=0x{:x} cr4=0x{:x} efer=0x{:x} cs=0x{:x} l={} d={} type={}\n",
+        tracing::debug!(
+            "DEBUG boot: KVM_GET_SREGS initial: cr0=0x{:x} cr4=0x{:x} efer=0x{:x} cs=0x{:x} l={} d={} type={}",
             sregs.cr0, sregs.cr4, sregs.efer,
             sregs.cs.selector, sregs.cs.l, sregs.cs.db, sregs.cs.type_,
-        ));
+        );
     }
 
     // --- GDT descriptor ---
@@ -3227,20 +3230,21 @@ pub unsafe fn boot_linux(kvm: &Kvm, config: &BootConfig) -> Result<BootedVm> {
 
     #[cfg(debug_assertions)]
     {
-        use std::io::Write;
-        let _ = std::io::stderr().write_fmt(format_args!(
-            "DEBUG boot: SET_SREGS: cr0=0x{:x} cr3=0x{:x} cr4=0x{:x} efer=0x{:x}\n  cs={} type={} ss={} type={} ds={} type={}\n",
+        tracing::debug!(
+            "DEBUG boot: SET_SREGS: cr0=0x{:x} cr3=0x{:x} cr4=0x{:x} efer=0x{:x} cs={} type={} ss={} type={} ds={} type={}",
             sregs.cr0, sregs.cr3, sregs.cr4, sregs.efer,
             sregs.cs.selector, sregs.cs.type_, sregs.ss.selector, sregs.ss.type_, sregs.ds.selector, sregs.ds.type_,
-        ));
+        );
     }
     vcpu.set_sregs(&sregs)?;
     // Verify SET_SREGS was accepted by reading back SREGS
     #[cfg(debug_assertions)]
     {
         if let Ok(verify) = vcpu.get_sregs() {
-            eprintln!("DEBUG boot: POST-SET_SREGS verify: cs sel={} type={} ss sel={} type={} ds sel={} type={}",
-                verify.cs.selector, verify.cs.type_, verify.ss.selector, verify.ss.type_, verify.ds.selector, verify.ds.type_);
+            tracing::debug!(
+                "DEBUG boot: POST-SET_SREGS verify: cs sel={} type={} ss sel={} type={} ds sel={} type={}",
+                verify.cs.selector, verify.cs.type_, verify.ss.selector, verify.ss.type_, verify.ds.selector, verify.ds.type_,
+            );
         }
         // Verify GDT content in guest memory (debug-only, test diagnostics)
         // SAFETY: mem_ptr is a valid mmap covering addresses 0..mem_size (64MB).
@@ -3248,7 +3252,7 @@ pub unsafe fn boot_linux(kvm: &Kvm, config: &BootConfig) -> Result<BootedVm> {
         let gdt_data = unsafe { std::ptr::read_unaligned(mem_ptr.add(0x60010) as *const u64) };
         let gdt_code = unsafe { std::ptr::read_unaligned(mem_ptr.add(0x60008) as *const u64) };
         let gdt_null = unsafe { std::ptr::read_unaligned(mem_ptr.add(0x60000) as *const u64) };
-        eprintln!("DEBUG boot: GDT memory: null=0x{gdt_null:016x} code=0x{gdt_code:016x} data=0x{gdt_data:016x}");
+        tracing::debug!("DEBUG boot: GDT memory: null=0x{gdt_null:016x} code=0x{gdt_code:016x} data=0x{gdt_data:016x}");
     }
 
     // 9. Configure general-purpose registers (REGS)
@@ -3334,8 +3338,11 @@ pub unsafe fn run_until_ready(booted: &BootedVm) -> Result<()> {
                 // Dump VCPU state for debugging
                 #[cfg(debug_assertions)]
                 if let Ok(post_sregs) = booted.vcpu.get_sregs() {
-                    eprintln!(
-                        "DEBUG boot: FAIL_ENTRY state:\n  cr0=0x{:x} cr2=0x{:x} cr3=0x{:x} cr4=0x{:x} efer=0x{:x}\n  cs={{sel=0x{:x} base=0x{:x} limit=0x{:x} l={} d={} type={} p={} s={} g={}}}\n  ss={{sel=0x{:x} base=0x{:x} limit=0x{:x} type={} p={} g={}}}\n  ds={{sel=0x{:x} base=0x{:x} limit=0x{:x} type={} p={} g={}}}",
+                    tracing::debug!(
+                        "DEBUG boot: FAIL_ENTRY state: cr0=0x{:x} cr2=0x{:x} cr3=0x{:x} cr4=0x{:x} efer=0x{:x} \
+                         cs=sel=0x{:x} base=0x{:x} limit=0x{:x} l={} d={} type={} p={} s={} g={} \
+                         ss=sel=0x{:x} base=0x{:x} limit=0x{:x} type={} p={} g={} \
+                         ds=sel=0x{:x} base=0x{:x} limit=0x{:x} type={} p={} g={}",
                         post_sregs.cr0, post_sregs.cr2, post_sregs.cr3, post_sregs.cr4, post_sregs.efer,
                         post_sregs.cs.selector, post_sregs.cs.base, post_sregs.cs.limit, post_sregs.cs.l, post_sregs.cs.db, post_sregs.cs.type_, post_sregs.cs.present, post_sregs.cs.s, post_sregs.cs.g,
                         post_sregs.ss.selector, post_sregs.ss.base, post_sregs.ss.limit, post_sregs.ss.type_, post_sregs.ss.present, post_sregs.ss.g,

@@ -3,8 +3,16 @@
 Ultra-light KVM-based code execution sandbox. Fork a VM in ~0.5ms, memory overhead ~100KB per fork, binary ~2.2MB.
 
 ```bash
-tinymachine exec --lang wasm '(+ 1 2)'       # 4µs
-tinymachine exec --lang python 'print(1)'     # ~1.8ms (warm)
+tinymachine exec --lang wasm '
+    (module
+        (memory (export "memory") 1)
+        (func (export "main")
+            i32.const 0
+            i32.const 42
+            i32.store offset=0
+        )
+    )'                                      # 4µs
+tinymachine exec --lang python 'print(1)'     # ~1.8ms (warm, requires template)
 tinymachine template build python --variant minimal
 ```
 
@@ -72,6 +80,34 @@ Key decisions (why no Firecracker/QEMU):
 
 Full VM boot from kernel+initrd on demand. Required for GPU passthrough (VFIO) and long-running stateful environments.
 
+`FreshBootBackend` supports two optional flags set before `init()`:
+
+- **`capture_snapshot = true`** — after a successful boot, the VM state is saved to the template registry so Tier 2 (CoW fork) can reuse it. This guarantees both tiers use the same memory size and initrd, preventing the "snapshot builder vs fresh boot" divergence that caused silent file-extraction failures.
+- **`memory_size_override: Option<u64>`** — overrides the automatic memory size selection (by default derived from `variant::boot_memory_size_bytes()`). Useful for manual tuning without changing variant definitions.
+
+```rust
+let mut backend = FreshBootBackend::new();
+backend.capture_snapshot = true;          // Tier 3 → Tier 2 snapshot
+backend.memory_size_override = Some(768 * 1024 * 1024);  // force 768 MB
+backend.init(&variant)?;
+```
+
+### Variant Memory Sizing
+
+Memory size per variant is defined in a single function `variant::boot_memory_size_bytes()` used by both `build_snapshot.rs` and `fresh_boot.rs`:
+
+| Variant names | Memory | Reason |
+|---------------|--------|--------|
+| `pytorch`, `pytorch-cpu`, `pytorch-nv` | ~4 GB − 20 MB | Below IOAPIC hole for VFIO PCI BAR space |
+| `tinygrad-nv` | 768 MB | Initramfs ~281 MB uncompressed |
+| `tinygrad`, `tinygrad-cpu`, `numpy` | 512 MB | Initrd ~80-100 MB uncompressed; tmpfs needs 2× headroom |
+| all others (`minimal`, …) | 128 MB | Default |
+
+Override from CLI (snapshot builder):
+```bash
+cargo run --bin build-snapshot -- --variant tinygrad-cpu --memory-mb 1024
+```
+
 ## How It Works
 
 ### Fork Engine
@@ -107,7 +143,14 @@ tinymachine_fork::register_all_backends();
 // Create backend by tier
 let mut backend = tinymachine_api::create_backend(ExecutionTier::Wasm)?;
 backend.init(&Variant::new("wasm", "minimal", "base"))?;
-let output = backend.exec("(+ 1 2)")?;
+let output = backend.exec(r#"(module
+    (memory (export "memory") 1)
+    (func (export "main")
+        i32.const 0
+        i32.const 42
+        i32.store offset=0
+    )
+)"#)?;
 backend.reset()?;
 backend.destroy()?;
 ```
@@ -217,8 +260,8 @@ Per-backend seccomp filters installed at `exec()` time. Wasm gets read/write/exi
 # Build
 cargo build --release
 
-# WASM code execution
-tinymachine exec --lang wasm '(+ 1 2)'
+# WASM code execution (takes WAT — WebAssembly Text Format)
+tinymachine exec --lang wasm '(module (func (export "_start")))'
 
 # Template management
 tinymachine template build python --variant minimal   # Build a snapshot

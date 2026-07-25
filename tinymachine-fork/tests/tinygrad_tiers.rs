@@ -52,6 +52,7 @@ fn tinygrad_cpu_snapshot_mem() -> PathBuf {
 
 const TINYGRAD_TEST_CODE: &str = r#"
 import sys
+sys.path.insert(0, '/usr/lib/python3.12/dist-packages')
 sys.path.insert(0, '/usr/lib/python3.12/site-packages')
 
 from tinygrad import Tensor

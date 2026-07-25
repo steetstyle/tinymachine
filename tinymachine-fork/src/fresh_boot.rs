@@ -41,6 +41,7 @@ use crate::vfio::VfioPassthroughBase;
 
 use tinymachine_api::error::ApiError;
 use tinymachine_api::sandbox::SandboxBackend;
+use crate::template_registry::TemplateRegistry;
 
 // ─── Constants for kernel/initrd paths ──────────────────────────────
 
@@ -182,6 +183,15 @@ pub struct FreshBootBackend {
     /// Whether kernel modules (nvidia.ko) have been loaded in the guest.
     /// Set to true after successfully sending `!load-modules`.
     modules_loaded: bool,
+    /// If true, capture a snapshot after successful boot and store it to
+    /// the template registry.
+    /// Tier 2 (CoW fork) can then consume this snapshot instead of using a
+    /// separately-built one, ensuring memory-size and initrd agreement.
+    capture_snapshot: bool,
+    /// Optional override for guest memory size (in bytes).
+    /// When `Some`, this value is used instead of `variant::boot_memory_size_bytes()`.
+    /// Set this before calling `init()`.
+    pub memory_size_override: Option<u64>,
 }
 
 impl FreshBootBackend {
@@ -199,6 +209,8 @@ impl FreshBootBackend {
             num_msi_vectors: 0,
             msi_refresh_retries: MSI_REFRESH_RETRIES,
             modules_loaded: false,
+            capture_snapshot: false,
+            memory_size_override: None,
         }
     }
 
@@ -695,16 +707,10 @@ impl SandboxBackend for FreshBootBackend {
         // 20 MB below the LAPIC base). For full 4GB+ use two memory slots
         // (slot 0 = 0..0xFEC00000, slot 1 = above 4GB).
         // GPU variants: use full RAM. 32-bit PCI BARs will be assigned
-        // in high 32-bit space (above RAM, below 4GB). The guest PCI
-        // allocator finds space in the available 32-bit gap. If the gap
-        // is too small (e.g., 4GB RAM + LAPIC = ~2MB), the kernel may
-        // fail to assign BAR0. In that case, reduce RAM to 2GB.
-        let memory_size = match variant.name.as_str() {
-            "pytorch" | "pytorch-cpu" | "pytorch-nv" | "pytorch-amd" => crate::arch::interrupt::IOAPIC_BASE,  // below APIC MMIO
-            "tinygrad-nv" => 768 * 1024 * 1024,  // 768 MB — initramfs is ~281MB uncompressed
-            "tinygrad" | "tinygrad-cpu" | "numpy" => 512 * 1024 * 1024,
-            _ => 128 * 1024 * 1024,
-        };
+        // Use the centralised memory-size function so this stays in sync
+        // with build_snapshot.rs.  Set memory_size_override to override.
+        let memory_size = self.memory_size_override
+            .unwrap_or_else(|| crate::variant::boot_memory_size_bytes(&variant.name));
 
         // For GPU variants, enable PCI probing (remove pci=off).
         // For CPU-only variants, disable PCI for faster boot.
@@ -1069,11 +1075,58 @@ impl SandboxBackend for FreshBootBackend {
             // in setup_msi_routing() can successfully register MSI irqfds.
         }
 
+        // ── Snapshot capture (optional) ──────────────────────────────
+        // If capture_snapshot is set, save the booted VM state BEFORE
+        // moving into self, so Tier 2 (CoW fork) can reuse this snapshot.
+        // This ensures the same memory-size and initrd are used for both
+        // Tier 2 and Tier 3, avoiding the builder divergence problem.
+        let captured_snapshot = if self.capture_snapshot {
+            match booted.capture_snapshot() {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    warn!("FreshBoot: failed to capture snapshot: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         self.kvm = Some(kvm);
         self.booted = Some(booted);
         self.vfio = vfio;
         self.variant = Some(variant);
         self.initialized = true;
+
+        // Store captured snapshot to template registry (if any).
+        if let Some(ref snapshot) = captured_snapshot {
+            let templates_dir: PathBuf = match home_dir() {
+                Ok(home) => home.join(TINYOS_DIR).join("templates"),
+                Err(_) => {
+                    warn!("FreshBoot: cannot resolve home dir — snapshot store skipped");
+                    info!("FreshBoot: initialization complete");
+                    return Ok(());
+                }
+            };
+            // Borrow variant from self (it was moved above).
+            let variant = self.variant.as_ref()
+                .expect("variant just set above");
+            if let Ok(mut registry) = TemplateRegistry::open(Some(templates_dir)) {
+                match registry.store_snapshot(variant, snapshot) {
+                    Ok(_) => {
+                        info!(
+                            "FreshBoot: snapshot captured and stored for variant {}",
+                            variant.name
+                        );
+                    }
+                    Err(e) => {
+                        warn!("FreshBoot: failed to store snapshot: {e}");
+                    }
+                }
+            } else {
+                warn!("FreshBoot: cannot open template registry");
+            }
+        }
 
         info!("FreshBoot: initialization complete");
         Ok(())

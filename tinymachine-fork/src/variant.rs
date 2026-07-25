@@ -328,7 +328,7 @@ impl Variant {
             kernel_profile: KernelProfile::Base,
             needs_initrd: true,
             limits: ResourceLimits {
-                max_memory: 256 * 1024 * 1024,
+                max_memory: 512 * 1024 * 1024, // 512 MB — initrd ~80-100MB uncompressed
                 ..ResourceLimits::default()
             },
             pool_min: 1,
@@ -461,6 +461,38 @@ impl Variant {
             pool_idle_timeout_secs: 60,
             kernel_version: None,
         })
+    }
+}
+
+/// Return the boot memory size (in bytes) for a given variant name.
+///
+/// Uses the variant's `limits.max_memory` when the field is set to a
+/// non-default value (>64MB).  Otherwise falls back to a name-based map
+/// that **must** stay in sync with the variant definitions above.
+///
+/// This is the **single source of truth** for boot memory sizing, used
+/// by both `build_snapshot.rs` (Tier 2 snapshot builder) and
+/// `fresh_boot.rs` (Tier 3 fresh boot).  When a new variant is added,
+/// update BOTH the `Variant::python_*()` method AND this function.
+///
+/// # Special cases
+///
+/// * Pytorch variants return `0xFEC00000` (just below the x86 IOAPIC
+///   MMIO hole at 4 GB).  The guest PCI allocator needs space for GPU
+///   BARs in the 32-bit gap above RAM; 4 GB leaves no room, so we cap
+///   memory at ~4 GB − 20 MB.
+/// * `tinygrad-nv` returns 768 MB because its initramfs is ~281 MB
+///   uncompressed.
+pub fn boot_memory_size_bytes(name: &str) -> u64 {
+    match name {
+        // Pytorch variants — cap below 4 GB IOAPIC hole
+        "pytorch" | "pytorch-cpu" | "pytorch-nv" => 0xFEC00000,
+        // TinyGrad NV has a ~281 MB initramfs
+        "tinygrad-nv" => 768 * 1024 * 1024,
+        // Big initrd variants (~80-100 MB uncompressed, tmpfs needs room)
+        "tinygrad" | "tinygrad-cpu" | "numpy" => 512 * 1024 * 1024,
+        // Default for minimal / everything else
+        _ => 128 * 1024 * 1024,
     }
 }
 
@@ -716,7 +748,7 @@ mod tests {
         assert!(v.needs_initrd);
         assert!(!v.limits.gpu_required);
         assert!(!v.limits.network_allowed);
-        assert_eq!(v.limits.max_memory, 256 * 1024 * 1024);
+        assert_eq!(v.limits.max_memory, 512 * 1024 * 1024);
         assert_eq!(v.pool_min, 1);
         assert_eq!(v.pool_max, 5);
     }

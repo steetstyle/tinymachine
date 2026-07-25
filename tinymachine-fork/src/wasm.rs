@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 use thiserror::Error;
+use wasmtime_wasi::preview1::{WasiP1Ctx, add_to_linker_sync};
+use wasmtime_wasi::WasiCtxBuilder;
 
 /// Errors from Wasm operations
 #[derive(Error, Debug)]
@@ -19,13 +21,10 @@ pub enum WasmError {
 
 pub type Result<T> = std::result::Result<T, WasmError>;
 
-/// A Wasm sandbox instance
-///
-/// In Phase 0: minimal implementation that wraps wasmtime
-/// and provides a simple eval interface.
+/// A Wasm sandbox instance with full WASI Preview 1 support.
 pub struct WasmSandbox {
     engine: wasmtime::Engine,
-    store: wasmtime::Store<()>,
+    store: wasmtime::Store<WasiP1Ctx>,
     /// Cache of compiled wasmtime modules keyed by source hash (blake3).
     ///
     /// Avoids re-parsing, validating, and JIT-compiling the same WAT/wasm source
@@ -73,7 +72,13 @@ impl WasmSandbox {
         let engine = wasmtime::Engine::new(&config)
             .map_err(|e| WasmError::Wasmtime(e.to_string()))?;
 
-        let store = wasmtime::Store::new(&engine, ());
+        let store = wasmtime::Store::new(
+            &engine,
+            WasiCtxBuilder::new()
+                .inherit_stdout()
+                .inherit_stderr()
+                .build_p1(),
+        );
         let module_cache = HashMap::new();
         Ok(Self { engine, store, module_cache, fuel_limit: 100_000 })
     }
@@ -146,10 +151,12 @@ impl WasmSandbox {
         Ok("(executed successfully)".into())
     }
 
-    /// Execute a raw Wasm binary
+    /// Execute a raw Wasm binary with full WASI Preview 1 support.
     ///
     /// The compiled module is cached in `module_cache` keyed by blake3 hash
     /// of the binary bytes. Repeated calls with the same bytes skip compilation.
+    /// WASI functions (fd_write, fd_read, etc.) are linked via `add_to_linker_sync`
+    /// so modules can use stdin/stdout/stderr and other WASI Preview 1 syscalls.
     pub fn eval_wasm_binary(&mut self, wasm_bytes: &[u8]) -> Result<String> {
         let hash = blake3::hash(wasm_bytes);
         let module = if let Some(module) = self.module_cache.get(&hash) {
@@ -164,10 +171,9 @@ impl WasmSandbox {
         self.store.set_fuel(self.fuel_limit)
             .map_err(|e| WasmError::Runtime(e.to_string()))?;
 
-        // Phase 0: WASI support via simple linker (no add_to_linker_sync in this API version)
-        // Full WASI comes in Phase 1+
-        let linker = wasmtime::Linker::new(&self.engine);
-        let _ = &linker; // suppress unused warning
+        let mut linker = wasmtime::Linker::new(&self.engine);
+        add_to_linker_sync(&mut linker, |ctx: &mut WasiP1Ctx| ctx)
+            .map_err(|e| WasmError::Runtime(e.to_string()))?;
 
         let instance = linker.instantiate(&mut self.store, &module)
             .map_err(|e| WasmError::Runtime(e.to_string()))?;
@@ -182,10 +188,16 @@ impl WasmSandbox {
 
     /// Reset the sandbox to clean state
     ///
-    /// Creates a new Store but reuses the existing Engine (avoids JIT compilation
-    /// overhead and thread pool re-initialization).
+    /// Creates a new Store with a fresh WASI context but reuses the existing
+    /// Engine (avoids JIT compilation overhead and thread pool re-initialization).
     pub fn reset(&mut self) -> Result<()> {
-        self.store = wasmtime::Store::new(&self.engine, ());
+        self.store = wasmtime::Store::new(
+            &self.engine,
+            WasiCtxBuilder::new()
+                .inherit_stdout()
+                .inherit_stderr()
+                .build_p1(),
+        );
         self.store.set_fuel(self.fuel_limit)
             .map_err(|e| WasmError::Runtime(e.to_string()))?;
         Ok(())

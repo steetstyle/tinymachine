@@ -1,0 +1,39 @@
+From 34303d9f4c480f55ecb989751e65fe6c6362f6fd Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Furkan=20Bostanc=C4=B1?= <bostanci_furkan@hotmail.com>
+Date: Thu, 16 Jul 2026 14:56:24 +0300
+Subject: [PATCH] wait for GFW boot completion on Ada GPUs before Falcon
+ register access
+
+On Ada (AD104+) GPUs, the VBIOS FWSEC firmware must finish
+initializing before the Falcon registers at BAR0+0x110000 are
+accessible. Without this wait, the first register read in
+init_hw() may return garbage or cause a hang.
+
+The GFW boot completion is indicated by BAR0+0x118234 reading
+0xff. This matches the reference init sequence from nova-core
+(Rust GSP driver).
+---
+ tinygrad/runtime/support/nv/ip.py | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/tinygrad/runtime/support/nv/ip.py b/tinygrad/runtime/support/nv/ip.py
+index 75a208d05..559f86502 100644
+--- a/tinygrad/runtime/support/nv/ip.py
++++ b/tinygrad/runtime/support/nv/ip.py
+@@ -186,6 +186,13 @@ class NV_FLCN(NV_IP):
+   def init_hw(self):
+     self.falcon, self.sec2 = 0x00110000, 0x00840000
+ 
++    # Wait for Graphics Firmware Warm (GFW) boot to complete.
++    # On Ada (AD104+) GPUs, the VBIOS FWSEC must finish initializing
++    # before Falcon registers at BAR0+0x110000 are accessible.
++    # Poll BAR0+0x118234 until it reads 0xff.
++    wait_cond(lambda: self.nvdev.rreg(0x118234) & 0xff == 0xff,
++              timeout_ms=10000, msg="GFW boot timeout")
++
+     self.reset(self.falcon)
+     self.execute_hs(self.falcon, self.frts_image_paddr, code_off=0x0, data_off=self.desc_v3.IMEMLoadSize,
+       imemPa=self.desc_v3.IMEMPhysBase, imemVa=self.desc_v3.IMEMVirtBase, imemSz=self.desc_v3.IMEMLoadSize,
+-- 
+2.43.0
+

@@ -72,3 +72,8 @@ harness = false
 name = "sandbox_exec"
 path = "benches/sandbox_exec.rs"
 harness = false
+
+[[bench]]
+name = "kvm_backend_lifecycle"
+path = "benches/kvm_backend_lifecycle.rs"
+harness = false

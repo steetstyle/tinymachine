@@ -926,7 +926,7 @@ use tinymachine_api::ExecutionTier;
 ///    buffer, runs the VM (kernel boots + init executes code), reads output.
 /// 3. `reset` — No-op: each exec creates a fresh fork (no state to reset).
 /// 4. `destroy` — Releases the ForkEngine (and its KVM fd) by taking `self`.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct KvmForkBackend {
     engine: Option<ForkEngine>,
 }
@@ -1038,6 +1038,8 @@ mod tests {
     use crate::test_helpers;
     use crate::test_helpers::test_snapshot;
 
+    // ─── ForkEngine tests ─────────────────────────────────
+
     #[test]
     fn test_fork_engine_creation() {
         let kvm = match Kvm::new() {
@@ -1122,5 +1124,107 @@ mod tests {
         let forked = engine.fork().expect("fork with shared memory should succeed");
         assert!(forked.memory_size > 0);
         assert_eq!(engine.shared_regions()[0].1, 0x100000, "guest_phys should match");
+    }
+
+    // ─── SandboxBackend trait tests (Tier 2 lifecycle) ──────────────
+    //
+    // These test the KvmForkBackend through the SandboxBackend trait,
+
+    #[test]
+    fn test_kvm_fork_backend_create() {
+        // Verify we can create a boxed backend through the factory function
+        let mut backend = create_kvm_fork_backend();
+        let _variant = ApiVariant::new("python", "minimal", "base");
+
+        // Exec before init should fail
+        let result = backend.exec("print(1)");
+        assert!(result.is_err(), "exec without init should fail");
+        assert!(
+            result.unwrap_err().to_string().contains("not initialised"),
+            "error should mention not initialised"
+        );
+    }
+
+    #[test]
+    fn test_kvm_fork_backend_destroy_without_init() {
+        // destroy() on a fresh backend should not panic
+        let mut backend = KvmForkBackend::new();
+        let result = backend.destroy();
+        assert!(result.is_ok(), "destroy without init should succeed");
+    }
+
+    #[test]
+    fn test_kvm_fork_backend_reset_without_init() {
+        // reset() on a fresh backend should not panic
+        let mut backend = KvmForkBackend::new();
+        let result = backend.reset();
+        assert!(result.is_ok(), "reset without init should succeed");
+    }
+
+    #[test]
+    fn test_kvm_fork_backend_init_no_kvm() {
+        // If KVM is not available, init should return a sandbox error
+        // that includes "KVM init failed"
+        let mut backend = KvmForkBackend::new();
+        let variant = ApiVariant::new("python", "minimal", "base");
+        let result = backend.init(&variant);
+        match result {
+            Ok(()) => {
+                // KVM is available — skip the no-KVM check
+                eprintln!("KVM available — init succeeded");
+                // Clean up
+                let _ = backend.destroy();
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("KVM init failed") || msg.contains("not supported"),
+                    "init error should mention KVM or unsupported: got {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_kvm_fork_backend_registration() {
+        // Verify that register_all_backends includes KvmFork
+        // We can't easily check the internal registry, but we can verify
+        // the factory function exists and produces a valid boxed backend.
+        let backend = create_kvm_fork_backend();
+        // The returned value should implement SandboxBackend
+        let _: Box<dyn SandboxBackend> = backend;
+    }
+
+    #[test]
+    fn test_kvm_fork_backend_tier_constant() {
+        assert_eq!(
+            KvmForkBackend::tier(),
+            ExecutionTier::KvmFork,
+            "tier() should return KvmFork"
+        );
+    }
+
+    #[test]
+    fn test_kvm_fork_backend_debug() {
+        let backend = KvmForkBackend::new();
+        let debug_str = format!("{:?}", backend);
+        assert!(!debug_str.is_empty(), "Debug should not be empty");
+    }
+
+    #[test]
+    fn test_kvm_fork_backend_send() {
+        // Verify KvmForkBackend implements Send and Sync
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<KvmForkBackend>();
+        assert_sync::<KvmForkBackend>();
+    }
+
+    #[test]
+    fn test_kvm_fork_engine_send_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<ForkEngine>();
+        assert_sync::<ForkEngine>();
     }
 }

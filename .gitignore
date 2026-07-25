@@ -10,8 +10,26 @@ Cargo.lock
 *.elf
 *.iso
 *.img
+
+# Compressed archives — built by template/layer build scripts
 *.gz
-*.cpio
 *.zst
-templates/
+*.cpio
+
+# Local template registry (generated) — ~/.tinyos/templates/
+tinymachine-fork/templates/
+tools/initramfs/cpython/
+
+# Compiled binaries — built from init.c or downloaded by build scripts
+tools/initramfs/init
+tools/initramfs/bin/
+
+# Proprietary firmware blobs — downloaded by download-nv-firmware.sh at build time
+tools/initramfs/lib/firmware/
+tools/initramfs/lib/modules/
+tools/vbios/
+
+# Python bytecode cache
 __pycache__/
+tools/initramfs/*.zst
+tools/initramfs/*.bin

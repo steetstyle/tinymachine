@@ -1,0 +1,6 @@
+# Kernel modules (built locally, >100MB)
+lib/
+# Python build artifacts
+cpython/
+__pycache__/
+# tinyos_nv_patch.py is now tracked (VFIO passthrough patches)

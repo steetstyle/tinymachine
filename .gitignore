@@ -1,0 +1,17 @@
+target/
+Cargo.lock
+*.rs.bk
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.o
+*.elf
+*.iso
+*.img
+*.gz
+*.cpio
+*.zst
+templates/
+__pycache__/

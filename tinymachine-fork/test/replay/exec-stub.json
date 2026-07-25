@@ -1,0 +1,13 @@
+{
+  "snapshot_hash": "8596683076bf6d2d954c47f90a44c48aaf348a905980662a0479be00071729d0",
+  "cases": [
+    {
+      "code": "ping",
+      "expected": "ping"
+    },
+    {
+      "code": "test",
+      "expected": "test"
+    }
+  ]
+}

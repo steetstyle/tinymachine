@@ -1,0 +1,16 @@
+[package]
+name = "tinymachine-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Language-agnostic intermediate representation for TinyOS profiler and UOps analyzer"
+
+[features]
+default = ["python"]
+python = ["dep:rustpython-parser"]
+
+[dependencies]
+rustpython-parser = { version = "0.4", optional = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,74 @@
+[package]
+name = "tinymachine-fork"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["wasm"]
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+libc.workspace = true
+
+wasmtime = { version = "28", default-features = false, features = ["cranelift", "runtime", "wat", "pooling-allocator"], optional = true }
+wasmtime-wasi = { version = "28", default-features = false, features = ["preview1"], optional = true }
+
+blake3 = "1"
+sha2 = "0.10"
+base64 = "0.22"
+goblin = "0.9"
+
+tinymachine-api = { path = "../tinymachine-api" }
+tinymachine-config = { path = "../tinymachine-config" }
+tinymachine-ir = { version = "0.1.0", path = "../tinymachine-ir" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bench]]
+name = "kvm_ioctl"
+harness = false
+
+[[bench]]
+name = "fork_latency"
+harness = false
+
+[[bench]]
+name = "wasm_init"
+harness = false
+
+[[bench]]
+name = "cache"
+path = "benches/cache_bench.rs"
+harness = false
+
+[[bench]]
+name = "pool"
+path = "benches/pool_bench.rs"
+harness = false
+
+[[bench]]
+name = "fork_concurrent"
+path = "benches/fork_concurrent.rs"
+harness = false
+
+[[bench]]
+name = "composition"
+path = "benches/composition_bench.rs"
+harness = false
+
+[[bench]]
+name = "entropy_divergence"
+path = "benches/entropy_divergence.rs"
+harness = false
+
+[[bench]]
+name = "sandbox_exec"
+path = "benches/sandbox_exec.rs"
+harness = false

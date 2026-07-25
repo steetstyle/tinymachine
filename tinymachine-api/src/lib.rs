@@ -33,7 +33,7 @@ pub mod error;
 
 // ─── Re-exports ───────────────────────────────────────────────────────
 
-pub use sandbox::{SandboxBackend, ExecutionTier, create_backend, register_backend, BackendType};
+pub use sandbox::{SandboxBackend, ExecutionTier, create_backend, register_backend, BackendType, BackendFactory};
 pub use config::Config;
 pub use variant::Variant;
 pub use error::{ApiError, Result};

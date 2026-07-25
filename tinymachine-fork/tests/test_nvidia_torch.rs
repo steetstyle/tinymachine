@@ -17,8 +17,8 @@ fn test_nvidia_torch_quick() {
     use tinymachine_fork::vfio::{detect_gpu_devices, is_bound_to_vfio};
 
     // ── Prerequisites ──
-    let kernel = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-nvidia");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/pytorch/initrd.gz");
+    let kernel = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-nvidia");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/pytorch/initrd.gz");
     
     if !kernel.exists() {
         eprintln!("SKIP: vmlinux-gpu-nvidia not found");

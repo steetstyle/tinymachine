@@ -342,8 +342,8 @@ fn run_nordrand_test(kvm: &tinymachine_fork::kvm::Kvm)
 {
     // Locate kernel and initrd from template directory
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let tinyos_dir = PathBuf::from(&home).join(".tinyos");
-    let kernel_path = tinyos_dir.join("templates").join("kernel").join("vmlinux-base");
+    let tinymachine_dir = PathBuf::from(&home).join(".tinymachine");
+    let kernel_path = tinymachine_dir.join("templates").join("kernel").join("vmlinux-base");
 
     // Find initrd: scan all version dirs for initrd.gz / initrd
     let python_dir = tinyos_dir.join("templates").join("python");
@@ -543,9 +543,9 @@ fn load_snapshot(kvm: &tinymachine_fork::kvm::Kvm)
     -> (tinymachine_fork::snapshot::Snapshot, usize, bool)
 {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let tinyos_dir = PathBuf::from(&home).join(".tinyos");
+    let tinymachine_dir = PathBuf::from(&home).join(".tinymachine");
 
-    let python_dir = tinyos_dir.join("templates").join("python");
+    let python_dir = tinymachine_dir.join("templates").join("python");
     let latest_version = std::fs::read_dir(&python_dir).ok()
         .into_iter()
         .flatten()
@@ -555,7 +555,7 @@ fn load_snapshot(kvm: &tinymachine_fork::kvm::Kvm)
         .max()
         .unwrap_or(1);
 
-    let template_dir = tinyos_dir.join("templates").join("python")
+    let template_dir = tinymachine_dir.join("templates").join("python")
         .join(format!("v{}", latest_version)).join("minimal");
     let state_path = template_dir.join("state.json");
     let mem_path = template_dir.join("mem");

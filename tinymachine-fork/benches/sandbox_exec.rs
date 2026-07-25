@@ -22,7 +22,7 @@
 //!
 //! Environment / hardware prereqs:
 //!   - Cold boot:  vmlinux + initrd for python:minimal must exist
-//!   - All others: pre-built snapshot at ~/.tinyos/templates/python/v1/minimal/
+//!   - All others: pre-built snapshot at ~/.tinymachine/templates/python/v1/minimal/
 //!   - All: KVM must be available
 //!
 //! The benchmark checks prereqs and skips with a message if missing,
@@ -54,15 +54,15 @@ const PRINT1_ITERATIONS: usize = 1000;
 
 // ─── Setup helpers ─────────────────────────────────────────────────────
 
-fn home_tinyos_dir() -> PathBuf {
+fn home_tinymachine_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .expect("HOME must be set");
-    PathBuf::from(home).join(".tinyos")
+    PathBuf::from(home).join(".tinymachine")
 }
 
 fn template_dir() -> PathBuf {
-    home_tinyos_dir().join("templates").join(VARIANT_LANG).join("v1").join(VARIANT_NAME)
+    home_tinymachine_dir().join("templates").join(VARIANT_LANG).join("v1").join(VARIANT_NAME)
 }
 
 fn snapshot_path() -> PathBuf {
@@ -84,10 +84,10 @@ fn snapshot_exists() -> bool {
 }
 
 fn find_kernel() -> Option<PathBuf> {
-    let tinyos_dir = home_tinyos_dir();
+    let tinymachine_dir = home_tinymachine_dir();
     let candidates = [
-        tinyos_dir.join("templates/kernel/vmlinux-base"),
-        tinyos_dir.join("templates/kernel/vmlinux"),
+        tinymachine_dir.join("templates/kernel/vmlinux-base"),
+        tinymachine_dir.join("templates/kernel/vmlinux"),
         PathBuf::from("/boot/vmlinuz"),
     ];
     for p in &candidates {
@@ -130,8 +130,8 @@ fn variant() -> Variant {
 
 fn bench_cold_boot(times: &mut Vec<f64>, sub_steps: &mut Vec<(&str, Vec<f64>)>) -> Result<(), String> {
     let kvm = Kvm::new().map_err(|e| format!("KVM unavailable: {e}"))?;
-    let kernel = find_kernel().ok_or("No kernel found. Place vmlinux at ~/.tinyos/templates/kernel/vmlinux-base")?;
-    let initrd = find_initrd().ok_or("No initrd found. Run `tinyos template build python --variant minimal` first")?;
+    let kernel = find_kernel().ok_or("No kernel found. Place vmlinux at ~/.tinymachine/templates/kernel/vmlinux-base")?;
+    let initrd = find_initrd().ok_or("No initrd found. Run `tinymachine template build python --variant minimal` first")?;
 
     let config = BootConfig {
         kernel_path: kernel,
@@ -198,7 +198,7 @@ fn bench_cold_boot(times: &mut Vec<f64>, sub_steps: &mut Vec<(&str, Vec<f64>)>) 
             .map_err(|e| format!("Cannot open template registry: {e}"))?;
         registry.store_snapshot(&variant(), &snapshot)
             .map_err(|e| format!("Failed to store snapshot to disk: {e}"))?;
-        eprintln!("  ✓ Snapshot saved to ~/.tinyos/templates/ for benchmarks 2-4");
+        eprintln!("  ✓ Snapshot saved to ~/.tinymachine/templates/ for benchmarks 2-4");
     }
 
     Ok(())
@@ -208,7 +208,7 @@ fn bench_cold_boot(times: &mut Vec<f64>, sub_steps: &mut Vec<(&str, Vec<f64>)>) 
 //
 // Measures: TemplateRegistry::load_snapshot()  (total only)
 // ForkEngine::new() is measured by fork_latency bench (section 0).
-// Prereq:   pre-built snapshot at ~/.tinyos/templates/python/v1/minimal/
+// Prereq:   pre-built snapshot at ~/.tinymachine/templates/python/v1/minimal/
 // Time:     ~50-200µs per iteration
 
 fn bench_snapshot_restore(times: &mut Vec<f64>) -> Result<(), String> {
@@ -390,7 +390,7 @@ fn main() {
             Err(e) => print_skip(&e),
         }
     } else {
-        if !snap_ok { print_skip("No pre-built snapshot. Run `tinyos template build python --variant minimal`"); }
+        if !snap_ok { print_skip("No pre-built snapshot. Run `tinymachine template build python --variant minimal`"); }
         if !kvm_ok { print_skip("KVM not available"); }
     }
 
@@ -403,7 +403,7 @@ fn main() {
             Err(e) => print_skip(&e),
         }
     } else if !snap_ok {
-        print_skip("No pre-built snapshot. Run `tinyos template build python --variant minimal`");
+        print_skip("No pre-built snapshot. Run `tinymachine template build python --variant minimal`");
     }
 
     // ─── 4. Python print(1) ─────────────────────────────────────────
@@ -415,7 +415,7 @@ fn main() {
             Err(e) => print_skip(&e),
         }
     } else if !snap_ok {
-        print_skip("No pre-built snapshot. Run `tinyos template build python --variant minimal`");
+        print_skip("No pre-built snapshot. Run `tinymachine template build python --variant minimal`");
     }
 
     // ─── Summary ────────────────────────────────────────────────────

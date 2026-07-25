@@ -1,6 +1,6 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────────────────
-# TinyOS Kernel Builder — build vmlinux profiles for KVM sandboxes
+# TinyMachine Kernel Builder — build vmlinux profiles for KVM sandboxes
 # ──────────────────────────────────────────────────────────────────────
 #
 # Usage:
@@ -11,7 +11,7 @@
 #   ./build-kernel.sh --default 7.1.4         # change default version
 #
 # Each profile produces a stripped vmlinux ELF at:
-#   ~/.tinyos/templates/kernel/v{version}/vmlinux-<profile>
+#   ~/.tinymachine/templates/kernel/v{version}/vmlinux-<profile>
 #
 # Dependencies: gcc, make, flex, bison, libelf-dev, wget, curl
 # ──────────────────────────────────────────────────────────────────────
@@ -22,8 +22,8 @@ set -euo pipefail
 LINUX_VERSION="7.1.4"                       # Upstream version (default)
 LINUX_TARBALL="linux-${LINUX_VERSION}.tar.xz"
 LINUX_URL="https://cdn.kernel.org/pub/linux/kernel/v7.x/${LINUX_TARBALL}"
-BUILD_DIR="${BUILD_DIR:-/tmp/tinyos-kernel-build}"
-TINYOS_KERNEL_DIR="${HOME}/.tinyos/templates/kernel"
+BUILD_DIR="${BUILD_DIR:-/tmp/tinymachine-kernel-build}"
+TINYMACHINE_KERNEL_DIR="${HOME}/.tinymachine/templates/kernel"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Number of parallel build jobs
@@ -149,8 +149,8 @@ update_registry() {
     local version="$1"
     local profile="$2"
 
-    local reg_file="${TINYOS_KERNEL_DIR}/registry.toml"
-    mkdir -p "$TINYOS_KERNEL_DIR"
+    local reg_file="${TINYMACHINE_KERNEL_DIR}/registry.toml"
+    mkdir -p "$TINYMACHINE_KERNEL_DIR"
 
     # Load existing registry or create default
     local default_ver="${version}"
@@ -162,13 +162,13 @@ update_registry() {
     fi
 
     # Compute sha256 hash of the base kernel for this version
-    local base_file="${TINYOS_KERNEL_DIR}/v${version}/vmlinux-base"
+    local base_file="${TINYMACHINE_KERNEL_DIR}/v${version}/vmlinux-base"
     local hash=""
     if [ -f "$base_file" ]; then
         hash=$(sha256sum "$base_file" | cut -d' ' -f1)
     else
         # If no base kernel (e.g., only GPU profiles), hash from the current profile
-        local profile_file="${TINYOS_KERNEL_DIR}/v${version}/vmlinux-${profile}"
+        local profile_file="${TINYMACHINE_KERNEL_DIR}/v${version}/vmlinux-${profile}"
         if [ -f "$profile_file" ]; then
             hash=$(sha256sum "$profile_file" | cut -d' ' -f1)
         fi
@@ -177,8 +177,8 @@ update_registry() {
     # Discover all profiles for this version
     local profiles_list=""
     local first=true
-    if [ -d "${TINYOS_KERNEL_DIR}/v${version}" ]; then
-        for f in "${TINYOS_KERNEL_DIR}/v${version}"/vmlinux-*; do
+    if [ -d "${TINYMACHINE_KERNEL_DIR}/v${version}" ]; then
+        for f in "${TINYMACHINE_KERNEL_DIR}/v${version}"/vmlinux-*; do
             [ -f "$f" ] || continue
             local p_name="${f#*vmlinux-}"
             if [ "$first" = true ]; then
@@ -194,7 +194,7 @@ update_registry() {
     # Write registry.toml using a temporary file to avoid partial writes
     local tmp_reg=$(mktemp)
     cat > "$tmp_reg" << REGEOF
-# TinyOS Kernel Registry
+# TinyMachine Kernel Registry
 # Managed by build-kernel.sh — do not edit manually
 default_version = "${default_ver}"
 
@@ -205,9 +205,9 @@ hash = "${hash}"
 REGEOF
 
     # Add profile_hashes if we have any
-    if [ -d "${TINYOS_KERNEL_DIR}/v${version}" ]; then
+    if [ -d "${TINYMACHINE_KERNEL_DIR}/v${version}" ]; then
         local count=0
-        for f in "${TINYOS_KERNEL_DIR}/v${version}"/vmlinux-*; do
+        for f in "${TINYMACHINE_KERNEL_DIR}/v${version}"/vmlinux-*; do
             [ -f "$f" ] || continue
             local p_name="${f#*vmlinux-}"
             local p_hash
@@ -486,7 +486,7 @@ build_kernel() {
     local profile="$1"
     local version="$2"
     local kernel_dir="${BUILD_DIR}/linux-${version}"
-    local version_dir="${TINYOS_KERNEL_DIR}/v${version}"
+    local version_dir="${TINYMACHINE_KERNEL_DIR}/v${version}"
     local output_file="${version_dir}/$(profile_filename "$profile")"
 
     cd "$kernel_dir"
@@ -523,7 +523,7 @@ build_kernel() {
         mv vmlinux-stripped vmlinux
     fi
 
-    # Install to TinyOS templates (versioned directory)
+    # Install to TinyMachine templates (versioned directory)
     mkdir -p "$version_dir"
     cp vmlinux "$output_file"
     chmod 644 "$output_file"
@@ -537,7 +537,7 @@ build_kernel() {
         warn "Output does not appear to be an ELF binary"
     fi
 
-    # Install kernel modules to TinyOS initramfs staging directory
+    # Install kernel modules to TinyMachine initramfs staging directory
     # (so the initramfs builder picks up nouveau.ko and other =m drivers)
     local modules_staging="${SCRIPT_DIR}/initramfs/lib/modules/${version}"
     if [ -d "${kernel_dir}/drivers" ]; then
@@ -573,7 +573,7 @@ list_profiles() {
         # Check all version directories for this profile
         local found_versions=""
         local first_ver=true
-        for vdir in "${TINYOS_KERNEL_DIR}"/v*/; do
+        for vdir in "${TINYMACHINE_KERNEL_DIR}"/v*/; do
             [ -d "$vdir" ] || continue
             local ver_name="$(basename "$vdir")"
             ver_name="${ver_name#v}"
@@ -604,16 +604,16 @@ list_versions() {
     echo "Installed kernel versions:"
     echo "─────────────────────────"
 
-    if [ -f "${TINYOS_KERNEL_DIR}/registry.toml" ]; then
+    if [ -f "${TINYMACHINE_KERNEL_DIR}/registry.toml" ]; then
         local default_ver
-        default_ver=$(grep -oP 'default_version\s*=\s*"\K[^"]*' "${TINYOS_KERNEL_DIR}/registry.toml" 2>/dev/null || echo "")
-        echo "  Registry: ${TINYOS_KERNEL_DIR}/registry.toml"
+        default_ver=$(grep -oP 'default_version\s*=\s*"\K[^"]*' "${TINYMACHINE_KERNEL_DIR}/registry.toml" 2>/dev/null || echo "")
+        echo "  Registry: ${TINYMACHINE_KERNEL_DIR}/registry.toml"
         [ -n "$default_ver" ] && echo "  Default version: ${BLUE}${default_ver}${NC}"
         echo ""
     fi
 
     local count=0
-    for vdir in "${TINYOS_KERNEL_DIR}"/v*/; do
+    for vdir in "${TINYMACHINE_KERNEL_DIR}"/v*/; do
         [ -d "$vdir" ] || continue
         local ver_name="$(basename "$vdir")"
         ver_name="${ver_name#v}"
@@ -651,13 +651,13 @@ list_versions() {
 set_default_version() {
     local version="$1"
 
-    if [ ! -d "${TINYOS_KERNEL_DIR}/v${version}" ]; then
-        err "Version directory not found: ${TINYOS_KERNEL_DIR}/v${version}"
+    if [ ! -d "${TINYMACHINE_KERNEL_DIR}/v${version}" ]; then
+        err "Version directory not found: ${TINYMACHINE_KERNEL_DIR}/v${version}"
         exit 1
     fi
 
     # Create or update registry.toml
-    local reg_file="${TINYOS_KERNEL_DIR}/registry.toml"
+    local reg_file="${TINYMACHINE_KERNEL_DIR}/registry.toml"
 
     if [ -f "$reg_file" ]; then
         # Update existing registry
@@ -673,7 +673,7 @@ set_default_version() {
     else
         # Create minimal registry
         cat > "$reg_file" << REGEOF
-# TinyOS Kernel Registry
+# TinyMachine Kernel Registry
 # Managed by build-kernel.sh — do not edit manually
 default_version = "${version}"
 REGEOF
@@ -757,12 +757,12 @@ main() {
     profile="${positional_args[0]:-}"
 
     # Ensure TinyOS kernel directory exists
-    mkdir -p "$TINYOS_KERNEL_DIR"
+    mkdir -p "$TINYMACHINE_KERNEL_DIR"
 
     # List profiles if no argument
     if [ -z "$profile" ]; then
         echo ""
-        echo "TinyOS Kernel Builder v$(grep -oP 'LINUX_VERSION="\K[^"]*' "$0" 2>/dev/null || echo "$LINUX_VERSION")"
+        echo "TinyMachine Kernel Builder v$(grep -oP 'LINUX_VERSION="\K[^"]*' "$0" 2>/dev/null || echo "$LINUX_VERSION")"
         list_versions
         list_profiles
         echo ""
@@ -784,7 +784,7 @@ main() {
 
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║        TinyOS Kernel Builder — ${profile} (v${version})                ║"
+    echo "║        TinyMachine Kernel Builder — ${profile} (v${version})                ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
 
@@ -799,7 +799,7 @@ main() {
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
 
-    ls -lh "${TINYOS_KERNEL_DIR}/v${version}/$(profile_filename "$profile")"
+    ls -lh "${TINYMACHINE_KERNEL_DIR}/v${version}/$(profile_filename "$profile")"
 }
 
 main "$@"

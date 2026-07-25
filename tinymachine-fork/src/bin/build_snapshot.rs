@@ -195,7 +195,7 @@ fn main() {
     );
 
     // ── Step 6: Store via TemplateRegistry ──────────────────────────
-    // Using the real templates root (not ~/.tinyos/templates/)
+    // Using the real templates root (not ~/.tinymachine/templates/)
     // This correctly writes mem + state.json + meta.json + updates registry.json
     eprint!("Storing snapshot via TemplateRegistry... ");
     let store_start = Instant::now();
@@ -205,19 +205,19 @@ fn main() {
         .expect("store_snapshot() failed");
     eprintln!("OK ({:.1}s)", store_start.elapsed().as_secs_f64());
 
-    // ── Also store at ~/.tinyos/templates/ for backward compat ────────
-    let home_tinyos = PathBuf::from(
+    // ── Also store at ~/.tinymachine/templates/ for backward compat ──
+    let home_tinymachine = PathBuf::from(
         std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
-    ).join(".tinyos").join("templates");
-    if home_tinyos.exists() {
-        eprint!("Also storing at {}... ", home_tinyos.display());
-        let mut home_registry = TemplateRegistry::open(Some(home_tinyos))
+    ).join(".tinymachine").join("templates");
+    if home_tinymachine.exists() {
+        eprint!("Also storing at {}... ", home_tinymachine.display());
+        let mut home_registry = TemplateRegistry::open(Some(home_tinymachine))
             .expect("TemplateRegistry::open(home) failed");
         home_registry.store_snapshot(&variant, &snapshot)
             .expect("store_snapshot(home) failed");
         eprintln!("OK");
     } else {
-        eprintln!("{} does not exist — skipping", home_tinyos.display());
+        eprintln!("{} does not exist — skipping", home_tinymachine.display());
     }
 
     eprintln!();

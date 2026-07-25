@@ -874,7 +874,12 @@ impl BootedVm {
             if bus == vfio_dev.bus && guest_devfn == vfio_dev.devfn {
                 let offset = (reg + (port & 3) as u32) as u16;
                 let len = (4 - (port & 3) as usize).min(_size);
-                return vfio_dev.config_read(offset, len);
+                let val = vfio_dev.config_read(offset, len);
+                if offset >= 0x10 && offset <= 0x28 {
+                    eprintln!("[BOOT] pci_config_read GPU BDF {:02x}:{}.{} reg=0x{offset:02x} len={len} => 0x{val:08x}",
+                        bus, dev, func);
+                }
+                return val;
             }
         }
 
@@ -2201,6 +2206,10 @@ fn pci_config_read_inline(
                 for i in 0..size.min(4) {
                     val |= (buf[i] as u32) << (i * 8);
                 }
+                if reg >= 0x10 && reg <= 0x28 {
+                    eprintln!("[VBIOS-read] pci_config_read_inline BDF {:02x}:{:02x}.{} reg=0x{reg:02x} size={size} => 0x{val:08x}",
+                        bus, dev, func);
+                }
                 return val;
             }
         }
@@ -2251,6 +2260,10 @@ fn pci_config_write_inline(
             let mut buf = [0u8; 4];
             for i in 0..size.min(4) {
                 buf[i] = ((val >> (i * 8)) & 0xFF) as u8;
+            }
+            if reg >= 0x10 && reg <= 0x28 {
+                eprintln!("[VBIOS/kernel] pci_config_write GPU BDF {:02x}:{:02x}.{} reg=0x{reg:02x} size={size} val=0x{val:08x}",
+                    bus, dev, func);
             }
             use std::os::unix::fs::FileExt;
             let _ = pci.config_fd.write_all_at(&buf[..size], full_offset);

@@ -1,15 +1,15 @@
 //! Kernel cmdline config parser — for unikernel mode.
 //!
 //! In unikernel mode, there's no TOML parser or config file. Config is passed
-//! via kernel cmdline as `tinyos.key=value` pairs. The orchestrator embeds
+//! via kernel cmdline as `tinymachine.key=value` pairs. The orchestrator embeds
 //! these params when booting the unikernel, and the guest reads `/proc/cmdline`.
 //!
 //! # Format
 //! ```text
-//! console=ttyS0 tinyos.agent_id=my-agent tinyos.log_level=debug tinyos.enable_network=true
+//! console=ttyS0 tinymachine.agent_id=my-agent tinymachine.log_level=debug tinymachine.enable_network=true
 //! ```
 //!
-//! Only `tinyos.*` parameters are parsed. All other kernel parameters are ignored.
+//! Only `tinymachine.*` parameters are parsed. All other kernel parameters are ignored.
 
 use tracing::warn;
 
@@ -40,11 +40,11 @@ impl CmdlineConfig {
 
     /// Parse raw `/proc/cmdline` content (a single line of space-separated key=value pairs).
     ///
-    /// Only processes parameters with the `tinyos.` prefix. All other parameters
+    /// Only processes parameters with the `tinymachine.` prefix. All other parameters
     /// (kernel boot params like `console=ttyS0`, `acpi=off`, etc.) are silently ignored.
     ///
     /// # Errors
-    /// Returns `ConfigError::Validation` if a tinyos.* parameter cannot be parsed
+    /// Returns `ConfigError::Validation` if a tinymachine.* parameter cannot be parsed
     /// (e.g. invalid boolean value, non-numeric integer).
     pub fn parse(cmdline: &str) -> Result<Self, ConfigError> {
         let mut config = CmdlineConfig::default();
@@ -54,11 +54,11 @@ impl CmdlineConfig {
                 continue;
             }
 
-            if !token.starts_with("tinyos.") {
+            if !token.starts_with("tinymachine.") {
                 continue;
             }
 
-            let inner = token.strip_prefix("tinyos.").unwrap();
+            let inner = token.strip_prefix("tinymachine.").unwrap();
             let (key, value) = match inner.split_once('=') {
                 Some((k, v)) => (k.trim(), v.trim()),
                 None => {
@@ -111,7 +111,7 @@ impl CmdlineConfig {
             }
             "proxy_addr" => self.proxy_addr = Some(value.to_string()),
             _ => {
-                warn!("cmdline: unknown tinyos parameter: tinyos.{key}");
+                warn!("cmdline: unknown tinymachine parameter: tinymachine.{key}");
             }
         }
         Ok(())
@@ -141,34 +141,37 @@ impl CmdlineConfig {
         let mut parts: Vec<String> = Vec::new();
 
         if let Some(v) = &self.agent_id {
-            parts.push(format!("tinyos.agent_id={}", quote_if_needed(v)));
+            parts.push(format!("tinymachine.agent_id={}", quote_if_needed(v)));
         }
         if let Some(v) = &self.log_level {
-            parts.push(format!("tinyos.log_level={}", quote_if_needed(v)));
+            parts.push(format!("tinymachine.agent_id={}", quote_if_needed(v)));
+        }
+        if let Some(v) = &self.log_level {
+            parts.push(format!("tinymachine.log_level={}", quote_if_needed(v)));
         }
         if let Some(v) = &self.orchestrator_addr {
-            parts.push(format!("tinyos.orchestrator_addr={}", quote_if_needed(v)));
+            parts.push(format!("tinymachine.orchestrator_addr={}", quote_if_needed(v)));
         }
         if let Some(v) = &self.max_forks {
-            parts.push(format!("tinyos.max_forks={v}"));
+            parts.push(format!("tinymachine.max_forks={v}"));
         }
         if let Some(v) = &self.default_tier {
-            parts.push(format!("tinyos.default_tier={}", quote_if_needed(v)));
+            parts.push(format!("tinymachine.default_tier={}", quote_if_needed(v)));
         }
         if let Some(v) = &self.memory_limit_mb {
-            parts.push(format!("tinyos.memory_limit_mb={v}"));
+            parts.push(format!("tinymachine.memory_limit_mb={v}"));
         }
         if let Some(v) = &self.cpu_cores {
-            parts.push(format!("tinyos.cpu_cores={v}"));
+            parts.push(format!("tinymachine.cpu_cores={v}"));
         }
         if let Some(v) = &self.enable_network {
-            parts.push(format!("tinyos.enable_network={v}"));
+            parts.push(format!("tinymachine.enable_network={v}"));
         }
         if let Some(v) = &self.enable_gpu {
-            parts.push(format!("tinyos.enable_gpu={v}"));
+            parts.push(format!("tinymachine.enable_gpu={v}"));
         }
         if let Some(v) = &self.proxy_addr {
-            parts.push(format!("tinyos.proxy_addr={}", quote_if_needed(v)));
+            parts.push(format!("tinymachine.proxy_addr={}", quote_if_needed(v)));
         }
 
         parts.join(" ")
@@ -254,17 +257,17 @@ impl From<CmdlineConfig> for TinyMachineConfig {
 impl TinyMachineConfig {
     /// Load config: try kernel cmdline first (unikernel mode), fall back to TOML.
     ///
-    /// In unikernel mode, `/proc/cmdline` exists and contains `tinyos.*` params.
+    /// In unikernel mode, `/proc/cmdline` exists and contains `tinymachine.*` params.
     /// In binary mode, `/proc/cmdline` may still exist (Linux) but won't have
-    /// `tinyos.*` params, so we fall back to TOML file loading.
+    /// `tinymachine.*` params, so we fall back to TOML file loading.
     pub fn from_maybe_cmdline() -> Result<Self, ConfigError> {
         // Try reading /proc/cmdline — this always exists on Linux but may not
-        // contain tinyos.* parameters. If it does, use cmdline config.
+        // contain tinymachine.* parameters. If it does, use cmdline config.
         if let Ok(content) = std::fs::read_to_string("/proc/cmdline") {
             let cmdline_config = CmdlineConfig::parse(&content)?;
-            // If at least one tinyos.* param was found, use cmdline mode
-            let has_tinyos_params = content.contains("tinyos.");
-            if has_tinyos_params {
+            // If at least one tinymachine.* param was found, use cmdline mode
+            let has_tinymachine_params = content.contains("tinymachine.");
+            if has_tinymachine_params {
                 let mut config: TinyMachineConfig = cmdline_config.into();
                 // Apply defaults for unset fields
                 if config.fork.memory_mb == 0 {
@@ -280,7 +283,7 @@ impl TinyMachineConfig {
             }
         }
 
-        // No tinyos params found — fall back to TOML
+        // No tinymachine params found — fall back to TOML
         Self::load_default()
     }
 }
@@ -385,12 +388,12 @@ mod tests {
 
     #[test]
     fn test_parse_full_cmdline() {
-        let cmdline = "console=ttyS0 acpi=off tinyos.agent_id=my-agent tinyos.log_level=debug tinyos.orchestrator_addr=/tmp/tinyos.sock tinyos.max_forks=100 tinyos.default_tier=kvmfork tinyos.memory_limit_mb=512 tinyos.cpu_cores=2 tinyos.enable_network=true tinyos.enable_gpu=false tinyos.proxy_addr=127.0.0.1:8080";
+        let cmdline = "console=ttyS0 acpi=off tinymachine.agent_id=my-agent tinymachine.log_level=debug tinymachine.orchestrator_addr=/tmp/tinymachine.sock tinymachine.max_forks=100 tinymachine.default_tier=kvmfork tinymachine.memory_limit_mb=512 tinymachine.cpu_cores=2 tinymachine.enable_network=true tinymachine.enable_gpu=false tinymachine.proxy_addr=127.0.0.1:8080";
         let config = CmdlineConfig::parse(cmdline).unwrap();
 
         assert_eq!(config.agent_id.as_deref(), Some("my-agent"));
         assert_eq!(config.log_level.as_deref(), Some("debug"));
-        assert_eq!(config.orchestrator_addr.as_deref(), Some("/tmp/tinyos.sock"));
+        assert_eq!(config.orchestrator_addr.as_deref(), Some("/tmp/tinymachine.sock"));
         assert_eq!(config.max_forks, Some(100));
         assert_eq!(config.default_tier.as_deref(), Some("kvmfork"));
         assert_eq!(config.memory_limit_mb, Some(512));
@@ -402,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_parse_partial_cmdline() {
-        let cmdline = "tinyos.agent_id=my-agent tinyos.cpu_cores=4 tinyos.enable_network=false";
+        let cmdline = "tinymachine.agent_id=my-agent tinymachine.cpu_cores=4 tinymachine.enable_network=false";
         let config = CmdlineConfig::parse(cmdline).unwrap();
 
         assert_eq!(config.agent_id.as_deref(), Some("my-agent"));
@@ -436,7 +439,7 @@ mod tests {
         let original = CmdlineConfig {
             agent_id: Some("test-agent".into()),
             log_level: Some("warn".into()),
-            orchestrator_addr: Some("/run/tinyos.sock".into()),
+            orchestrator_addr: Some("/run/tinymachine.sock".into()),
             max_forks: Some(50),
             default_tier: Some("wasm".into()),
             memory_limit_mb: Some(1024),
@@ -489,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_quoted_strings() {
-        let cmdline = r#"tinyos.agent_id="my agent" tinyos.log_level='debug mode' tinyos.cpu_cores=2"#;
+        let cmdline = r#"tinymachine.agent_id="my agent" tinymachine.log_level='debug mode' tinymachine.cpu_cores=2"#;
         let config = CmdlineConfig::parse(cmdline).unwrap();
         assert_eq!(config.agent_id.as_deref(), Some("my agent"));
         assert_eq!(config.log_level.as_deref(), Some("debug mode"));
@@ -498,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_tokenize_comments() {
-        let cmdline = "tinyos.agent_id=visible # this is a comment\ntinyos.log_level=debug";
+        let cmdline = "tinymachine.agent_id=visible # this is a comment\ntinymachine.log_level=debug";
         let config = CmdlineConfig::parse(cmdline).unwrap();
         assert_eq!(config.agent_id.as_deref(), Some("visible"));
         assert_eq!(config.log_level.as_deref(), Some("debug"));
@@ -536,14 +539,14 @@ mod tests {
 
     #[test]
     fn test_invalid_values() {
-        assert!(CmdlineConfig::parse("tinyos.max_forks=not_a_number").is_err());
-        assert!(CmdlineConfig::parse("tinyos.enable_network=maybe").is_err());
-        assert!(CmdlineConfig::parse("tinyos.cpu_cores=-1").is_err());
+        assert!(CmdlineConfig::parse("tinymachine.max_forks=not_a_number").is_err());
+        assert!(CmdlineConfig::parse("tinymachine.enable_network=maybe").is_err());
+        assert!(CmdlineConfig::parse("tinymachine.cpu_cores=-1").is_err());
     }
 
     #[test]
     fn test_unknown_param_is_ignored() {
-        let cmdline = "tinyos.unknown_param=foo tinyos.agent_id=bar";
+        let cmdline = "tinymachine.unknown_param=foo tinymachine.agent_id=bar";
         let config = CmdlineConfig::parse(cmdline).unwrap();
         assert_eq!(config.agent_id.as_deref(), Some("bar"));
         assert_eq!(config.log_level, None);
@@ -551,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_from_maybe_cmdline_falls_back_to_default() {
-        // When /proc/cmdline exists but has no tinyos.* params,
+        // When /proc/cmdline exists but has no tinymachine.* params,
         // from_maybe_cmdline should fall back to loading default TOML config.
         // We can test the logic by checking the behavior: it should return
         // a valid TinyMachineConfig with defaults.

@@ -46,7 +46,7 @@ use crate::template_registry::TemplateRegistry;
 // ─── Constants for kernel/initrd paths ──────────────────────────────
 
 /// Default TinyMachine home directory name
-const TINYOS_DIR: &str = ".tinyos";
+const TINYMACHINE_DIR: &str = ".tinymachine";
 
 /// Number of retries for MSI routing refresh after first exec().
 ///
@@ -333,7 +333,7 @@ impl FreshBootBackend {
     /// Errors if the registry cannot resolve the version+profile.
     pub(crate) fn find_kernel_path(variant: &Variant) -> Result<String> {
         let home = home_dir()?;
-        let kernel_dir = home.join(TINYOS_DIR).join("templates").join("kernel");
+        let kernel_dir = home.join(TINYMACHINE_DIR).join("templates").join("kernel");
 
         let kreg = crate::kernel_registry::KernelRegistry::load(&kernel_dir)
             .map_err(|e| FreshBootError::MissingKernel(format!(
@@ -348,7 +348,7 @@ impl FreshBootBackend {
         let profile = variant.kernel_profile.as_str();
         let kernel_path = kreg.resolve(version, profile).map_err(|e| {
             FreshBootError::MissingKernel(format!(
-                "Kernel registry: {e} — run `tinyos template build {} --variant {}` first",
+                "Kernel registry: {e} — run `tinymachine template build {} --variant {}` first",
                 variant.lang, variant.name,
             ))
         })?;
@@ -362,7 +362,7 @@ impl FreshBootBackend {
     /// Errors if the registry cannot resolve the version+profile.
     pub(crate) fn resolve_kernel_info(variant: &Variant) -> Result<(String, String, String)> {
         let home = home_dir()?;
-        let kernel_dir = home.join(TINYOS_DIR).join("templates").join("kernel");
+        let kernel_dir = home.join(TINYMACHINE_DIR).join("templates").join("kernel");
 
         let kreg = crate::kernel_registry::KernelRegistry::load(&kernel_dir)
             .map_err(|e| FreshBootError::MissingKernel(format!(
@@ -377,7 +377,7 @@ impl FreshBootBackend {
         let profile = variant.kernel_profile.as_str();
         let kernel_path = kreg.resolve(version, profile).map_err(|e| {
             FreshBootError::MissingKernel(format!(
-                "Kernel registry: {e} — run `tinyos template build {} --variant {}` first",
+                "Kernel registry: {e} — run `tinymachine template build {} --variant {}` first",
                 variant.lang, variant.name,
             ))
         })?;
@@ -401,7 +401,7 @@ impl FreshBootBackend {
         }
         let home = home_dir()?;
         let variant_dir = home
-            .join(TINYOS_DIR)
+            .join(TINYMACHINE_DIR)
             .join("templates")
             .join(&variant.lang)
             .join("v1")
@@ -435,7 +435,7 @@ impl FreshBootBackend {
         }
 
         Err(FreshBootError::MissingInitrd(format!(
-            "Initrd not found in {} — run `tinyos template build {} --variant {}` first",
+            "Initrd not found in {} — run `tinymachine template build {} --variant {}` first",
             variant_dir.display(),
             variant.lang,
             variant.name,
@@ -466,7 +466,7 @@ impl FreshBootBackend {
     ///
     /// Searches:
     /// 1. `tools/vbios/<name>` relative to current directory
-    /// 2. `~/.tinyos/vbios/<name>`
+    /// 2. `~/.tinymachine/vbios/<name>`
     ///
     /// Returns `None` if not found or size is invalid (<512 or >4MB).
     fn find_and_read_vbios(name: &str) -> Option<Vec<u8>> {
@@ -474,9 +474,9 @@ impl FreshBootBackend {
             let mut v: Vec<std::path::PathBuf> = Vec::new();
             // tools/vbios/ relative to current dir
             v.push(std::path::PathBuf::from("tools").join("vbios").join(name));
-            // ~/.tinyos/vbios/
+            // ~/.tinymachine/vbios/
             if let Ok(home) = std::env::var("HOME") {
-                v.push(std::path::PathBuf::from(home).join(".tinyos").join("vbios").join(name));
+                v.push(std::path::PathBuf::from(home).join(".tinymachine").join("vbios").join(name));
             }
             v
         };
@@ -751,7 +751,10 @@ impl SandboxBackend for FreshBootBackend {
                     // mmap handler (resource1 mmap). Without realloc, the kernel
                     // keeps our firmware-style pre-assignment.
                     // pcie_port_pm=off: prevent GPU D3cold (PCIe port power mgmt).
-                    Some(crate::arch::boot::build_kernel_cmdline(3, "pci=noearly acpi_irq_handling=off pcie_port_pm=off"))
+                    // pci=conf1: force legacy I/O port config access (our proxy).
+                    // The alternative (MMIO/ECAM) bypasses our proxy and sees
+                    // stale (pre-restoration) BAR values.
+                    Some(crate::arch::boot::build_kernel_cmdline(3, "pci=noearly acpi_irq_handling=off pcie_port_pm=off pci=conf1"))
                 }
                 _ => {
                     // Base (CPU-only): minimal cmdline, no GPU params needed.
@@ -954,8 +957,6 @@ impl SandboxBackend for FreshBootBackend {
         // real mode via KVM, initializing the display controller and Falcon engines.
         // This is identical to what SeaBIOS does in QEMU-based setups.
         //
-        // See .opencode/plans/PLAN.md §8.5 for the GPU power init investigation.
-        info!("FreshBoot: SKIPPING GSP bootloader firmware (AD104 VFIO limitation)");
         // 4b. VBIOS POST (Phase 1: real-mode GPU initialization)
         //
         // If a VBIOS Option ROM is available for this GPU, run it in real
@@ -1014,6 +1015,56 @@ impl SandboxBackend for FreshBootBackend {
                 .map_err(|e| ApiError::sandbox(format!("Long mode reconfig failed: {e}")))?;
             }
             info!("FreshBoot: VCPU reconfigured, continuing with kernel boot");
+
+            // Restore pre-assigned BAR addresses after VBIOS POST.
+            // The VBIOS firmware may have reassigned BARs (e.g. to addresses
+            // that overlap with guest RAM or conflict with E820 reservations).
+            // Without this restoration, the guest kernel sees VBIOS-changed
+            // BARs, the post-boot KVM slot creation fails (address conflicts
+            // with RAM), and all PCI resource0 reads return EIO.
+            //
+            // We disable Memory Space (cmd reg bit 1) before writing BARs per
+            // PCI spec: BAR writes are ignored when the address space enable
+            // bit is set. We re-enable after restoration.
+            if let Some(ref mut vfio_after) = vfio {
+                if let (Some(cfg_off), Some(dev_fd)) = (
+                    vfio_after.config_region_offset(),
+                    vfio_after.device_fd(),
+                ) {
+                    let cmd_off = cfg_off + 0x4;
+                    let mut old_cmd: u32 = 0;
+                    if unsafe { libc::pread(dev_fd, &mut old_cmd as *mut u32 as *mut libc::c_void, 4, cmd_off as i64) } == 4 {
+                        let no_mem = (old_cmd as u16 & !0x2) as u32;
+                        unsafe { libc::pwrite(dev_fd, &no_mem as *const u32 as *const libc::c_void, 4, cmd_off as i64); }
+                    }
+                    match vfio_after.preassign_guest_bar_addresses() {
+                        Ok(assignments) => {
+                            for (idx, addr, _sz) in &assignments {
+                                let bar_off = cfg_off + 0x10 + (*idx as u64) * 4;
+                                let mut v1: u32 = 0;
+                                unsafe { libc::pread(dev_fd, &mut v1 as *mut u32 as *mut libc::c_void, 4, bar_off as i64); }
+                                // Also read via config proxy fd if available
+                                if let Some(ref pci) = booted.vfio_pci {
+                                    use std::os::unix::fs::FileExt;
+                                    let mut buf = [0u8; 4];
+                                    let proxy_off = pci.config_region_offset + 0x10 + (*idx as u64) * 4;
+                                    let v2 = if pci.config_fd.read_exact_at(&mut buf[..4], proxy_off).is_ok() {
+                                        u32::from_le_bytes(buf)
+                                    } else {
+                                        0xFFFFFFFF
+                                    };
+                                    eprintln!("[FRESHBOOT] BAR{idx} restore: wrote=GPA{addr:#x} dev_fd_read=0x{v1:08x} proxy_read=0x{v2:08x}");
+                                } else {
+                                    eprintln!("[FRESHBOOT] BAR{idx} restore: wrote=GPA{addr:#x} dev_fd_read=0x{v1:08x} (no proxy)");
+                                }
+                            }
+                        }
+                        Err(e) => { eprintln!("[FRESHBOOT] BAR post-VBIOS restore FAILED: {e}"); }
+                    }
+                    // Restore command register (re-enable Memory Space)
+                    unsafe { libc::pwrite(dev_fd, &old_cmd as *const u32 as *const libc::c_void, 4, cmd_off as i64); }
+                }
+            }
         } else {
             info!("FreshBoot: no VBIOS ROM found — skipping VBIOS POST");
         }
@@ -1101,7 +1152,7 @@ impl SandboxBackend for FreshBootBackend {
         // Store captured snapshot to template registry (if any).
         if let Some(ref snapshot) = captured_snapshot {
             let templates_dir: PathBuf = match home_dir() {
-                Ok(home) => home.join(TINYOS_DIR).join("templates"),
+                Ok(home) => home.join(TINYMACHINE_DIR).join("templates"),
                 Err(_) => {
                     warn!("FreshBoot: cannot resolve home dir — snapshot store skipped");
                     info!("FreshBoot: initialization complete");

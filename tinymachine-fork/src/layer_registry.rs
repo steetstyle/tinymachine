@@ -6,9 +6,9 @@
 //! # Architecture
 //!
 //! Each installed layer is a `.cpio.zst` archive stored at:
-//! `~/.tinyos/layers/<type>/<name>/<version>/layer.cpio.zst`
-//!
-//! The registry index is at `~/.tinyos/layers/registry.toml`.
+    //! `~/.tinymachine/layers/<type>/<name>/<version>/layer.cpio.zst`
+    //!
+    //! The registry index is at `~/.tinymachine/layers/registry.toml`.
 //!
 //! # Safety
 //! This module contains no unsafe code. All I/O uses standard library
@@ -220,12 +220,12 @@ pub fn parse_version_constraint(s: &str) -> (String, VersionConstraint) {
     }
 }
 
-/// Parse `# tinyos:dep name@version` pragmas from code
+/// Parse `# tinymachine:dep name@version` pragmas from code
 pub fn parse_pragmas(code: &str) -> Vec<(String, String)> {
     let mut deps = Vec::new();
     for line in code.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("# tinyos:dep ") {
+        if let Some(rest) = trimmed.strip_prefix("# tinymachine:dep ") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             for part in parts {
                 let (name, ver) = parse_version_constraint(part);
@@ -339,21 +339,21 @@ pub fn import_to_pip_layer(import_name: &str) -> Option<&'static str> {
 /// Layer Registry — manages layer metadata and resolves imports
 #[derive(Debug, Clone)]
 pub struct LayerRegistry {
-    /// Base path for layers (~/.tinyos/layers/)
+    /// Base path for layers (~/.tinymachine/layers/)
     layers_path: PathBuf,
     /// Index of all installed layers: type/name → version → metadata
     index: HashMap<String, Vec<LayerMetadata>>,
 }
 
 impl LayerRegistry {
-    /// Load registry from the default path (~/.tinyos/layers/registry.toml)
+    /// Load registry from the default path (~/.tinymachine/layers/registry.toml)
     pub fn load() -> Result<Self> {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .map_err(|e| RegistryError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound, format!("HOME not set: {e}")
             )))?;
-        let layers_path = home.join(".tinyos").join("layers");
+        let layers_path = home.join(".tinymachine").join("layers");
         Self::load_from(&layers_path)
     }
 
@@ -679,7 +679,7 @@ impl LayerRegistry {
         let runtime_ref = self.get_layer(&LayerType::Runtime, runtime_name, &runtime_ver)?;
         all_layer_refs.push(runtime_ref);
 
-        // 3. Parse pragmas from code (# tinyos:dep name@version)
+        // 3. Parse pragmas from code (# tinymachine:dep name@version)
         let pragma_deps = parse_pragmas(code);
         let mut all_explicit_deps: Vec<(String, String)> = explicit_deps.to_vec();
         for (name, version) in pragma_deps {
@@ -883,7 +883,7 @@ mod tests {
 
     fn test_registry() -> LayerRegistry {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("tinyos-test-registry-{counter}"));
+        let dir = std::env::temp_dir().join(format!("tinymachine-test-registry-{counter}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -932,8 +932,8 @@ mod tests {
     #[test]
     fn test_parse_pragmas() {
         let code = "\
-# tinyos:dep numpy@1.26.4
-# tinyos:dep tinygrad@latest
+# tinymachine:dep numpy@1.26.4
+# tinymachine:dep tinygrad@latest
 import numpy
 ";
         let deps = parse_pragmas(code);
@@ -1049,7 +1049,7 @@ import numpy
         // Test with node (npm type): create a new registry with express
         let node_registry = {
             let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir2 = std::env::temp_dir().join(format!("tinyos-test-registry-node-{counter}"));
+            let dir2 = std::env::temp_dir().join(format!("tinymachine-test-registry-node-{counter}"));
             let _ = fs::remove_dir_all(&dir2);
             fs::create_dir_all(&dir2).unwrap();
             let node_dir = dir2.join("npm").join("express").join("4.19.0");
@@ -1074,7 +1074,7 @@ import numpy
         // Create a separate registry with tinygrad (has explicit gpu-vk kernel profile)
         let tg_registry = {
             let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let dir2 = std::env::temp_dir().join(format!("tinyos-test-registry-tg-{counter}"));
+            let dir2 = std::env::temp_dir().join(format!("tinymachine-test-registry-tg-{counter}"));
             let _ = fs::remove_dir_all(&dir2);
             fs::create_dir_all(&dir2).unwrap();
             // Need base + python runtime too

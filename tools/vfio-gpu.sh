@@ -17,9 +17,9 @@ set -euo pipefail
 
 GPU_BDF="0000:01:00.0"
 AUDIO_BDF="0000:01:00.1"
-TINYOS_DIR="${HOME}/.tinyos/templates"
-KERNEL="${TINYOS_DIR}/kernel/v7.1.4/bzImage-gpu-nvidia"
-INITRD="${TINYOS_DIR}/python/v1/minimal/initrd.zst"
+TINYMACHINE_DIR="${HOME}/.tinymachine/templates"
+KERNEL="${TINYMACHINE_DIR}/kernel/v7.1.4/bzImage-gpu-nvidia"
+INITRD="${TINYMACHINE_DIR}/python/v1/minimal/initrd.zst"
 SERIAL_DELAY=10
 
 # ─── Renkler ──────────────────────────────────────────────────────────

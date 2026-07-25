@@ -59,8 +59,8 @@ fn home_dir() -> PathBuf {
     PathBuf::from(home)
 }
 
-fn tinyos_dir() -> PathBuf {
-    home_dir().join(".tinyos")
+fn tinymachine_dir() -> PathBuf {
+    home_dir().join(".tinymachine")
 }
 
 fn cmd_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -96,7 +96,7 @@ fn cmd_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| format!("Unknown variant: {}", api_variant))?;
 
             // Try ForkEngine via template snapshot
-            let templates_dir = tinyos_dir().join("templates");
+            let templates_dir = tinymachine_dir().join("templates");
             let registry = tinymachine_fork::template_registry::TemplateRegistry::open(Some(templates_dir))?;
 
             if !registry.has_snapshot(&fork_variant) {
@@ -175,7 +175,7 @@ fn cmd_template_build(args: TemplateBuildArgs) -> Result<(), Box<dyn std::error:
     use tinymachine_fork::kvm::Kvm;
     use tinymachine_fork::variant::KernelProfile;
 
-    let tdir = tinyos_dir();
+    let tdir = tinymachine_dir();
     let templates_dir = tdir.join("templates");
 
     let api_variant = tinymachine_api::Variant::new(&args.lang, &args.variant, &args.kernel_profile);
@@ -239,7 +239,7 @@ fn cmd_template_build(args: TemplateBuildArgs) -> Result<(), Box<dyn std::error:
 
 fn cmd_template_list() -> Result<(), Box<dyn std::error::Error>> {
     let registry = tinymachine_fork::template_registry::TemplateRegistry::open(
-        Some(tinyos_dir().join("templates")),
+        Some(tinymachine_dir().join("templates")),
     )?;
     let templates = registry.list_templates();
 
@@ -263,7 +263,7 @@ fn cmd_template_list() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_template_remove(args: TemplateRemoveArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let tdir = tinyos_dir();
+    let tdir = tinymachine_dir();
     let templates_dir = tdir.join("templates");
     let registry = tinymachine_fork::template_registry::TemplateRegistry::open(Some(templates_dir.clone()))?;
     let api_variant = tinymachine_api::Variant::new(&args.lang, &args.variant, "base");
@@ -306,7 +306,7 @@ fn cmd_layer(args: LayerArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_layer_list() -> Result<(), Box<dyn std::error::Error>> {
-    let layers_dir = tinyos_dir().join("layers");
+    let layers_dir = tinymachine_dir().join("layers");
     if !layers_dir.exists() {
         println!("No layers found.");
         return Ok(());
@@ -329,21 +329,21 @@ fn cmd_layer_list() -> Result<(), Box<dyn std::error::Error>> {
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
-fn find_initrd(tinyos_dir: &PathBuf, lang: &str, variant: &str) -> Option<PathBuf> {
+fn find_initrd(tinymachine_dir: &PathBuf, lang: &str, variant: &str) -> Option<PathBuf> {
     let candidates = [
-        tinyos_dir
+        tinymachine_dir
             .join("templates")
             .join(lang)
             .join("v1")
             .join(variant)
             .join("initrd.gz"),
-        tinyos_dir
+        tinymachine_dir
             .join("templates")
             .join(lang)
             .join("v1")
             .join(variant)
             .join("initrd"),
-        tinyos_dir
+        tinymachine_dir
             .join("templates")
             .join(lang)
             .join("v1")

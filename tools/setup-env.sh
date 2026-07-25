@@ -8,15 +8,15 @@
 #   bash tools/setup-env.sh
 #
 # Prerequisites:
-#   - ~/.tinyos/templates/python/v1/minimal/initrd.gz (from a prior build)
-#   - Kernel image at ~/.tinyos/templates/kernel/vmlinux-base
+#   - ~/.tinymachine/templates/python/v1/minimal/initrd.gz (from a prior build)
+#   - Kernel image at ~/.tinymachine/templates/kernel/vmlinux-base
 
 set -euo pipefail
 
 # ─── Config ─────────────────────────────────────────────────────────────
 
-TINYOS_DIR="${HOME}/.tinyos"
-TEMPLATES_DIR="${TINYOS_DIR}/templates"
+TINYMACHINE_DIR="${HOME}/.tinymachine"
+TEMPLATES_DIR="${TINYMACHINE_DIR}/templates"
 INITRD="${TEMPLATES_DIR}/python/v1/minimal/initrd.gz"
 KERNEL="${TEMPLATES_DIR}/kernel/vmlinux-base"
 ZSTD_BIN=$(command -v zstd || true)
@@ -74,7 +74,7 @@ fi
 if [ ! -f "$INITRD" ]; then
     err "Initrd not found at $INITRD"
     err "A python:minimal template must exist first."
-    err "Build from the tinyos repo or use: tools/build-variant-initramfs.sh minimal"
+    err "Build from the tinymachine repo or use: tools/build-variant-initramfs.sh minimal"
     exit 1
 fi
 log "Initrd found: $INITRD"

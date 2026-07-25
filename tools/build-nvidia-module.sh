@@ -1,9 +1,9 @@
 #!/bin/bash
 # ──────────────────────────────────────────────────────────────────────
-# TinyOS NVIDIA Kernel Module Builder
+# TinyMachine NVIDIA Kernel Module Builder
 # ──────────────────────────────────────────────────────────────────────
 #
-# Builds nvidia.ko (and friends) against the TinyOS guest kernel.
+# Builds nvidia.ko (and friends) against the TinyMachine guest kernel.
 # Produces: nvidia.ko, nvidia-uvm.ko, nvidia-modeset.ko,
 #           nvidia-drm.ko, nvidia-peermem.ko
 #
@@ -23,20 +23,20 @@
 #   Specified via --nvidia-src
 #
 # Kernel source expected at:
-#   /tmp/tinyos-kernel-build/linux-{version}/
+#   /tmp/tinymachine-kernel-build/linux-{version}/
 #   Specified via --kernel-dir
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 # ─── Config defaults ──────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TINYOS_DIR="${HOME}/.tinyos/templates"
-KERNEL_BUILD_DIR="${BUILD_DIR:-/tmp/tinyos-kernel-build}"
+TINYMACHINE_DIR="${HOME}/.tinymachine/templates"
+KERNEL_BUILD_DIR="${BUILD_DIR:-/tmp/tinymachine-kernel-build}"
 KERNEL_VERSION="${KERNEL_VERSION:-7.1.4}"
 KERNEL_DIR="${KERNEL_DIR:-${KERNEL_BUILD_DIR}/linux-${KERNEL_VERSION}}"
 NVIDIA_BUILD_DIR="/tmp/nvidia-build"
 CONFTEST_CACHE_DIR="${NVIDIA_BUILD_DIR}/conftest"
-TINYOS_INITRD_DIR="${TINYOS_DIR}/python/v1"
+TINYMACHINE_INITRD_DIR="${TINYMACHINE_DIR}/python/v1"
 
 # ─── Colors ──────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -211,8 +211,8 @@ list_modules() {
 # ─── Pack modules into variant initrd ─────────────────────────────────
 install_modules() {
     local variant="$1"
-    local initrd_src="${TINYOS_INITRD_DIR}/${variant}/initrd.zst"
-    local initrd_dst="${TINYOS_INITRD_DIR}/${variant}/initrd.zst"
+    local initrd_src="${TINYMACHINE_INITRD_DIR}/${variant}/initrd.zst"
+    local initrd_dst="${TINYMACHINE_INITRD_DIR}/${variant}/initrd.zst"
 
     if [ ! -f "$initrd_src" ] && [ "$variant" != "nvidia" ]; then
         # Try build it
@@ -338,7 +338,7 @@ echo "╚═══════════════════════�
 echo ""
 info "Modules:       ${NVIDIA_BUILD_DIR}/nvidia*.ko"
 if [ "$DO_INSTALL" = true ]; then
-    info "Installed to:  ${TINYOS_INITRD_DIR}/${VARIANT}/initrd.zst"
+    info "Installed to:  ${TINYMACHINE_INITRD_DIR}/${VARIANT}/initrd.zst"
 fi
 info "Test command:  ./test-vfio-gpu.sh --variant ${VARIANT}"
 echo ""

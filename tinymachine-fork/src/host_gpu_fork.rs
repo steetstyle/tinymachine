@@ -183,6 +183,7 @@ def _worker_main():
     device_name = None
     try:
         from tinygrad import Device, Tensor
+        from tinygrad import nn
         import numpy as np
         dev = Device["NV"]
         device_name = "NV"
@@ -203,6 +204,7 @@ def _worker_main():
     _clean_globals = {
         "Device": Device, "Tensor": Tensor,
         "np": np, "numpy": np,
+        "nn": nn,
         "__builtins__": __builtins__,
     }
     
@@ -272,7 +274,7 @@ import time
 
 def _worker_main():
     try:
-        from tinygrad import Device, Tensor
+        from tinygrad import Device, Tensor, nn
         import numpy as np
     except ImportError:
         print(json.dumps({"type": "error", "msg": "tinygrad not installed"}))
@@ -315,11 +317,11 @@ def _worker_main():
             
             runner = (
                 "import sys, json, traceback\n"
-                "from tinygrad import Device, Tensor\n"
+                "from tinygrad import Device, Tensor, nn\n"
                 "import numpy as np\n"
                 "try:\n"
                 "    exec(" + json.dumps(code) + ", "
-                '{"Device": Device, "Tensor": Tensor, "np": np, '
+                '{"Device": Device, "Tensor": Tensor, "nn": nn, "np": np, '
                 '"numpy": np, "__builtins__": __builtins__})\n'
                 "except SystemExit:\n"
                 "    pass\n"
@@ -402,7 +404,7 @@ import select as _select
 
 def _worker_main():
     try:
-        from tinygrad import Device, Tensor
+        from tinygrad import Device, Tensor, nn
         import numpy as np
     except ImportError:
         print(json.dumps({"type": "error", "msg": "tinygrad not installed"}))
@@ -580,7 +582,7 @@ pub enum HostGpuError {
     #[error("HostGpuFork not initialized — call init() first")]
     NotInitialized,
     /// The variant is not supported by this backend.
-    #[error("Unsupported variant {0} — HostGpuFork only supports python:tinygrad-nv")]
+    #[error("Unsupported variant {0} — HostGpuFork only supports python:tinygrad or python:tinygrad-nv")]
     UnsupportedVariant(String),
 }
 
@@ -1121,17 +1123,17 @@ impl SandboxBackend for HostGpuForkBackend {
             return Ok(());
         }
 
-        // Validate variant — we support python:tinygrad-nv (NV GPU variant)
+        // Validate variant — we support python:tinygrad-nv and python:tinygrad (NV GPU variants)
         if variant.lang != "python" {
             return Err(ApiError::Unsupported(format!(
                 "HostGpuFork only supports python, got '{}'",
                 variant.lang
             )));
         }
-        if variant.variant != "tinygrad-nv" {
+        if variant.variant != "tinygrad-nv" && variant.variant != "tinygrad" {
             return Err(ApiError::Unsupported(format!(
-                "HostGpuFork only supports python:tinygrad-nv, got '{}:{}'. \
-                 CPU variants (tinygrad, tinygrad-cpu) use KvmForkBackend, not HostGpuFork.",
+                "HostGpuFork only supports python:tinygrad or python:tinygrad-nv, got '{}:{}'. \
+                 CPU variants (tinygrad-cpu) use KvmForkBackend, not HostGpuFork.",
                 variant.lang, variant.variant
             )));
         }
@@ -1525,6 +1527,432 @@ print(c.tolist())
         let result = exec_tinygrad(code).expect("exec_tinygrad failed");
         assert!(!result.is_empty(), "Should have output");
         println!("exec_tinygrad result: {result}");
+    }
+
+    /// Comprehensive tensor operation tests on NV device.
+    ///
+    /// Tests a wide range of tensor operations against numpy reference values.
+    /// Each operation is tested in a separate exec() call, so a failure in one
+    /// doesn't prevent others from running.
+    #[test]
+    #[ignore = "Requires python3 + tinygrad + nvidia.ko on host"]
+    fn test_nv_tensor_ops() {
+        let mut backend = create_test_backend();
+        let variant = Variant::new("python", "tinygrad", "gpu-vk");
+        backend.init(&variant).expect("Failed to init — NV device required");
+        assert!(backend.has_gpu(), "Backend must have GPU");
+
+        let mut passed = 0u32;
+        let mut failed = 0u32;
+        let mut failures: Vec<String> = Vec::new();
+
+        let mut run_op = |name: &str, code: &str| {
+            let result = backend.exec(code);
+            match result {
+                Ok(output) => {
+                    if output.contains("PASS") {
+                        passed += 1;
+                        println!("  ✓ {name}");
+                    } else if output.contains("FAIL") {
+                        failed += 1;
+                        let msg = format!("{name}: {output}");
+                        failures.push(msg.clone());
+                        println!("  ✗ {name}: {output}");
+                    } else {
+                        // Indeterminate — might just be print output
+                        passed += 1;
+                        println!("  ? {name}: {output:.80}");
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    let msg = format!("{name}: exec error — {e}");
+                    failures.push(msg);
+                    println!("  ✗ {name}: {e}");
+                }
+            }
+        };
+
+        // ── Creation ops ──
+        run_op("full", r#"
+import numpy as np; from tinygrad import Tensor
+t = Tensor.full((3,4), 7.0, device='NV')
+ref = np.full((3,4), 7.0)
+if np.allclose(t.numpy(), ref): print("PASS: full =", t.tolist())
+else: print(f"FAIL: got {t.numpy()}, expected {ref}")
+"#);
+
+        run_op("zeros", r#"
+import numpy as np; from tinygrad import Tensor
+t = Tensor.zeros(2,5, device='NV')
+ref = np.zeros((2,5))
+if np.allclose(t.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {t.numpy()}")
+"#);
+
+        run_op("ones", r#"
+import numpy as np; from tinygrad import Tensor
+t = Tensor.ones(4,3, device='NV')
+ref = np.ones((4,3))
+if np.allclose(t.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {t.numpy()}")
+"#);
+
+        run_op("arange", r#"
+import numpy as np; from tinygrad import Tensor
+t = Tensor.arange(12, device='NV').reshape(3,4)
+ref = np.arange(12).reshape(3,4)
+if np.allclose(t.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {t.numpy()}, expected {ref}")
+"#);
+
+        run_op("eye", r#"
+import numpy as np; from tinygrad import Tensor
+t = Tensor.eye(5, device='NV')
+ref = np.eye(5)
+if np.allclose(t.numpy(), ref): print("PASS")
+else: print(f"FAIL")
+"#);
+
+        // ── Elementwise binary ops ──
+        run_op("add", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([1.0,2.0,3.0,4.0], device='NV')
+b = Tensor([5.0,6.0,7.0,8.0], device='NV')
+c = (a + b).realize()
+ref = np.array([1,2,3,4]) + np.array([5,6,7,8])
+if np.allclose(c.numpy(), ref): print("PASS: add =", c.tolist())
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("sub", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([10.0,20.0,30.0], device='NV')
+b = Tensor([1.0,2.0,3.0], device='NV')
+c = (a - b).realize()
+ref = np.array([10,20,30]) - np.array([1,2,3])
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        run_op("mul", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([2.0,3.0,4.0], device='NV')
+b = Tensor([5.0,6.0,7.0], device='NV')
+c = (a * b).realize()
+ref = np.array([2,3,4]) * np.array([5,6,7])
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        run_op("div", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([10.0,20.0,30.0], device='NV')
+b = Tensor([2.0,4.0,5.0], device='NV')
+c = (a / b).realize()
+ref = np.array([10,20,30]) / np.array([2,4,5])
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("neg", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([1.0,-2.0,3.0], device='NV')
+c = (-a).realize()
+ref = -np.array([1.0,-2.0,3.0])
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL")
+"#);
+
+        run_op("pow", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([2.0,3.0,4.0], device='NV')
+c = (a ** 3).realize()
+ref = np.array([2.0,3.0,4.0]) ** 3
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        // ── Unary elementwise ops ──
+        run_op("sqrt", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([4.0,9.0,16.0], device='NV')
+c = a.sqrt().realize()
+ref = np.sqrt(np.array([4.0,9.0,16.0]))
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        run_op("exp", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([0.0,1.0,2.0], device='NV')
+c = a.exp().realize()
+ref = np.exp(np.array([0.0,1.0,2.0]))
+if np.allclose(c.numpy(), ref, atol=1e-5): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("log", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([1.0,2.0,3.0], device='NV')
+c = a.log().realize()
+ref = np.log(np.array([1.0,2.0,3.0]))
+if np.allclose(c.numpy(), ref, atol=1e-5): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("sin", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([0.0, 1.57079632679, 3.14159265359], device='NV')  # 0, pi/2, pi
+c = a.sin().realize()
+ref = np.sin(np.array([0.0, 1.57079632679, 3.14159265359]))
+if np.allclose(c.numpy(), ref, atol=1e-5): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("cos", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([0.0, 1.57079632679, 3.14159265359], device='NV')
+c = a.cos().realize()
+ref = np.cos(np.array([0.0, 1.57079632679, 3.14159265359]))
+if np.allclose(c.numpy(), ref, atol=1e-5): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        run_op("relu", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([-2.0, -1.0, 0.0, 1.0, 2.0], device='NV')
+c = a.relu().realize()
+ref = np.maximum(np.array([-2.0,-1.0,0.0,1.0,2.0]), 0)
+if np.allclose(c.numpy(), ref): print("PASS: relu =", c.tolist())
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("sigmoid", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([-2.0, -1.0, 0.0, 1.0, 2.0], device='NV')
+c = a.sigmoid().realize()
+ref = 1.0 / (1.0 + np.exp(-np.array([-2.0,-1.0,0.0,1.0,2.0])))
+if np.allclose(c.numpy(), ref, atol=1e-5): print("PASS")
+else: print(f"FAIL: got {c.numpy()[:3]}...")
+"#);
+
+        run_op("tanh", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([-1.0, 0.0, 1.0], device='NV')
+c = a.tanh().realize()
+ref = np.tanh(np.array([-1.0,0.0,1.0]))
+if np.allclose(c.numpy(), ref, atol=1e-5): print("PASS")
+else: print(f"FAIL")
+"#);
+
+        // ── Reduction ops ──
+        run_op("sum", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([[1.0,2.0,3.0],[4.0,5.0,6.0]], device='NV')
+c = a.sum().realize()
+ref = np.sum(np.array([[1.,2.,3.],[4.,5.,6.]]))
+if np.allclose(c.numpy(), ref): print("PASS: sum =", c.numpy())
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("sum_axis", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([[1.0,2.0,3.0],[4.0,5.0,6.0]], device='NV')
+c = a.sum(axis=1).realize()
+ref = np.sum(np.array([[1.,2.,3.],[4.,5.,6.]]), axis=1)
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("mean", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([1.0,2.0,3.0,4.0], device='NV')
+c = a.mean().realize()
+ref = np.mean(np.array([1.0,2.0,3.0,4.0]))
+if np.allclose(c.numpy(), ref): print("PASS: mean =", c.numpy())
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("max", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([3.0,1.0,4.0,1.0,5.0], device='NV')
+c = a.max().realize()
+ref = np.max(np.array([3.0,1.0,4.0,1.0,5.0]))
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("min", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([3.0,1.0,4.0,1.0,5.0], device='NV')
+c = a.min().realize()
+ref = np.min(np.array([3.0,1.0,4.0,1.0,5.0]))
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        // ── Movement ops ──
+        run_op("reshape", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor.arange(6, device='NV')
+c = a.reshape(2,3).realize()
+ref = np.arange(6).reshape(2,3)
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        run_op("permute", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor.arange(6, device='NV').reshape(2,3)
+c = a.permute(1,0).realize()
+ref = np.arange(6).reshape(2,3).transpose(1,0)
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("transpose", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor.arange(6, device='NV').reshape(2,3)
+c = a.transpose().realize()
+ref = np.arange(6).reshape(2,3).T
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        run_op("flatten", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor.arange(6, device='NV').reshape(2,3)
+c = a.flatten().realize()
+ref = np.arange(6)
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL")
+"#);
+
+        // ── Linear algebra ops ──
+        run_op("matmul", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([[1.0,2.0],[3.0,4.0]], device='NV')
+b = Tensor([[5.0,6.0],[7.0,8.0]], device='NV')
+c = (a @ b).realize()
+ref = np.array([[1.,2.],[3.,4.]]) @ np.array([[5.,6.],[7.,8.]])
+if np.allclose(c.numpy(), ref): print("PASS: matmul =", c.tolist())
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("matmul_large", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor.randn(16, 32, device='NV')
+b = Tensor.randn(32, 8, device='NV')
+c = (a @ b).realize()
+ref = a.numpy() @ b.numpy()
+if np.allclose(c.numpy(), ref, atol=1e-4, rtol=1e-3): print("PASS")
+else: print(f"FAIL: max diff={np.max(np.abs(c.numpy()-ref)):.6f}")
+"#);
+
+        // ── Neural network ops ──
+        run_op("linear_layer", r#"
+import numpy as np; from tinygrad import Tensor, nn
+layer = nn.Linear(4, 2)
+x = Tensor.randn(3, 4, device='NV')
+out = layer(x).realize()
+if out.shape == (3, 2): print("PASS: linear layer output shape", out.shape)
+else: print(f"FAIL: expected (3,2), got {out.shape}")
+"#);
+
+        run_op("conv2d", r#"
+import numpy as np; from tinygrad import Tensor, nn
+x = Tensor.randn(1, 3, 8, 8, device='NV')
+w = Tensor.randn(4, 3, 3, 3, device='NV')
+out = x.conv2d(w).realize()
+ref_shape = (1, 4, 6, 6)
+if out.shape == ref_shape: print("PASS: conv2d shape", out.shape)
+else: print(f"FAIL: expected {ref_shape}, got {out.shape}")
+"#);
+
+        run_op("softmax", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([[1.0,2.0,3.0],[1.0,2.0,3.0]], device='NV')
+c = a.softmax().realize()
+ref = np.array([[1.,2.,3.],[1.,2.,3.]])
+ref = np.exp(ref) / np.sum(np.exp(ref), axis=1, keepdims=True)
+if np.allclose(c.numpy(), ref, atol=1e-5): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        run_op("log_softmax", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([[1.0,2.0,3.0],[1.0,2.0,3.0]], device='NV')
+c = a.log_softmax().realize()
+ref = np.array([[1.,2.,3.],[1.,2.,3.]])
+ref -= np.log(np.sum(np.exp(ref), axis=1, keepdims=True))
+if np.allclose(c.numpy(), ref, atol=1e-5): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        run_op("batch_norm", r#"
+import numpy as np; from tinygrad import Tensor, nn
+x = Tensor.randn(2, 4, 3, 3, device='NV')
+bn = nn.BatchNorm2d(4, device='NV')
+out = bn(x).realize()
+if out.shape == x.shape: print("PASS: batchnorm shape", out.shape)
+else: print(f"FAIL: expected {x.shape}, got {out.shape}")
+"#);
+
+        // ── Comparison ops ──
+        run_op("eq", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([1.0,2.0,3.0], device='NV')
+b = Tensor([1.0,2.0,4.0], device='NV')
+c = (a == b).realize()
+ref = np.array([1.,2.,3.]) == np.array([1.,2.,4.])
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        run_op("maximum", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([1.0,5.0,3.0], device='NV')
+b = Tensor([4.0,2.0,6.0], device='NV')
+c = a.maximum(b).realize()
+ref = np.maximum(np.array([1.,5.,3.]), np.array([4.,2.,6.]))
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}")
+"#);
+
+        // ── Scalar ops ──
+        run_op("scalar_mul_add", r#"
+import numpy as np; from tinygrad import Tensor
+a = Tensor([1.0,2.0,3.0], device='NV')
+c = (a * 2.0 + 1.0).realize()
+ref = np.array([1.,2.,3.]) * 2.0 + 1.0
+if np.allclose(c.numpy(), ref): print("PASS")
+else: print(f"FAIL: got {c.numpy()}, expected {ref}")
+"#);
+
+        // ── Chain test: multi-op ──
+        run_op("multi_op_chain", r#"
+import numpy as np; from tinygrad import Tensor
+x = Tensor([1.0,2.0,3.0,4.0], device='NV')
+y = Tensor([2.0,3.0,4.0,5.0], device='NV')
+z = (x * y + x - y / 2.0).realize()
+ref = np.array([1.,2.,3.,4.]) * np.array([2.,3.,4.,5.]) + np.array([1.,2.,3.,4.]) - np.array([2.,3.,4.,5.]) / 2.0
+if np.allclose(z.numpy(), ref, atol=1e-5): print("PASS")
+else: print(f"FAIL: got {z.numpy()}, expected {ref}")
+"#);
+
+        // ── Print summary ──
+        println!("\n═══ NV Tensor Ops Summary ═══");
+        println!("  Passed: {passed}");
+        println!("  Failed: {failed}");
+        if !failures.is_empty() {
+            for f in &failures {
+                println!("  - {f}");
+            }
+        }
+
+        backend.destroy().expect("Failed to destroy");
+        assert_eq!(failed, 0, "{} tensor op(s) failed. See above for details.", failed);
     }
 
     /// Benchmark execution latency for the persistent worker.

@@ -993,6 +993,8 @@ impl VfioPassthroughBase {
                 continue;
             }
 
+            eprintln!("[VFIO] map_guest_bar_slots: BAR{} guest_phys={:#x} size={} offset={:#x}",
+                bar.index, guest_phys, bar.size, bar.offset);
             info!(
                 "VFIO: mapping BAR{} at guest GPA {:#x} (size {}, VFIO offset {:#x})",
                 bar.index, guest_phys, bar.size, bar.offset

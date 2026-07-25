@@ -7,7 +7,7 @@
 //!
 //! 1. **Conflict check** — list files in each layer cpio, detect path collisions
 //! 2. **Initrd composition** — concatenate layer `.cpio.zst` files + append `cmd.json`
-//! 3. **Cache storage** — store composed initrd under `~/.tinyos/cache/<key>/`
+//! 3. **Cache storage** — store composed initrd under `~/.tinymachine/cache/<key>/`
 //! 4. **Cache lookup** — check cache before building (avoids redundant composition)
 //!
 //! # Linux Initrd Loading
@@ -20,7 +20,7 @@
 //! # Cache Layout
 //!
 //! ```text
-//! ~/.tinyos/cache/<composition_key>/
+//! ~/.tinymachine/cache/<composition_key>/
 //! ├── initrd.zst          # concatenated layer cpios + cmd.json
 //! ├── cmd.json            # execution config (for inspection)
 //! └── meta.json           # composition metadata
@@ -121,7 +121,7 @@ struct CacheMeta {
 
 /// Composition cache manager.
 ///
-/// Stores composed initrds under `~/.tinyos/cache/<composition_key>/`.
+/// Stores composed initrds under `~/.tinymachine/cache/<composition_key>/`.
 /// Supports LRU eviction when the cache exceeds the configured max size.
 pub struct CompositionCache {
     /// Root directory for cached compositions.
@@ -142,7 +142,7 @@ impl CompositionCache {
     /// Default cache root directory.
     pub fn default_root() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".tinyos").join("cache")
+        PathBuf::from(home).join(".tinymachine").join("cache")
     }
 
     /// Get the directory path for a composition key.
@@ -324,7 +324,7 @@ impl CompositionCache {
 
     /// Store a booted VM snapshot in the composition cache.
     ///
-    /// Saves the snapshot under `~/.tinyos/cache/<key>/snapshot/` using
+    /// Saves the snapshot under `~/.tinymachine/cache/<key>/snapshot/` using
     /// [`Snapshot::save()`], which writes `mem`, `state.json`, `meta.json`,
     /// and optional files (xsave, irqchips).
     ///
@@ -674,7 +674,7 @@ fn create_cmd_json_cpio(cmd_json: &str) -> std::result::Result<Vec<u8>, Composer
     use std::sync::atomic::{AtomicU64, Ordering};
     static CMD_COUNTER: AtomicU64 = AtomicU64::new(0);
     let tmp_dir = std::env::temp_dir().join(format!(
-        "tinyos-cmd-{}-{}",
+        "tinymachine-cmd-{}-{}",
         std::process::id(),
         CMD_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
@@ -755,7 +755,7 @@ fn create_cmd_json_cpio(cmd_json: &str) -> std::result::Result<Vec<u8>, Composer
         // Try plain cpio without compression (kernel will still accept it)
         let fallback_id = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_dir2 = std::env::temp_dir().join(format!(
-            "tinyos-cmd-fallback-{}-{}",
+            "tinymachine-cmd-fallback-{}-{}",
             std::process::id(),
             fallback_id
         ));
@@ -1182,7 +1182,7 @@ mod tests {
         let (_tmp, registry) = setup_registry();
         let cache = CompositionCache::new(
             std::env::temp_dir().join(format!(
-                "tinyos-cache-test-{}",
+                "tinymachine-cache-test-{}",
                 TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
             )),
             50,
@@ -1220,7 +1220,7 @@ mod tests {
     fn test_resolve_and_compose_caches() {
         let (_tmp, registry) = setup_registry();
         let cache_dir = std::env::temp_dir().join(format!(
-            "tinyos-cache-test-{}",
+            "tinymachine-cache-test-{}",
             TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
         ));
         let cache = CompositionCache::new(cache_dir.clone(), 50);
@@ -1364,7 +1364,7 @@ mod tests {
     #[test]
     fn test_cache_default_root() {
         let root = CompositionCache::default_root();
-        assert!(root.ends_with(".tinyos/cache"));
+        assert!(root.ends_with(".tinymachine/cache"));
     }
 
     // ─── CmdConfig Creation ──────────────────────────────────────

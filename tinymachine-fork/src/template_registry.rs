@@ -1,9 +1,9 @@
 //! Template Registry — manages per-variant snapshot storage, kernel binaries, and warm pool config.
 //!
-//! Templates are stored under `~/.tinyos/templates/`:
+//! Templates are stored under `~/.tinymachine/templates/`:
 //!
 //! ```text
-//! ~/.tinyos/templates/
+//! ~/.tinymachine/templates/
 //! ├── python/
 //! │   ├── v1/
 //! │   │   ├── minimal/     ← snapshot (mem + state.json + meta.json)
@@ -86,10 +86,10 @@ pub struct TemplateRegistry {
 }
 
 impl TemplateRegistry {
-    /// Create a new registry at `~/.tinyos/templates/`
+    /// Create a new registry at `~/.tinymachine/templates/`
     pub fn default_root() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".tinyos").join("templates")
+        PathBuf::from(home).join(".tinymachine").join("templates")
     }
 
     /// Open or create the registry at the given root
@@ -328,7 +328,7 @@ mod tests {
     fn test_registry_create() {
         let tmp = {
             let c = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            std::env::temp_dir().join(format!("tinyos-reg-create-{p}-{c}", p = std::process::id()))
+            std::env::temp_dir().join(format!("tinymachine-reg-create-{p}-{c}", p = std::process::id()))
         };
         let _ = std::fs::remove_dir_all(&tmp);
 
@@ -343,7 +343,7 @@ mod tests {
     fn test_store_and_load_snapshot() {
         let tmp = {
             let c = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            std::env::temp_dir().join(format!("tinyos-reg-storeload-{p}-{c}", p = std::process::id()))
+            std::env::temp_dir().join(format!("tinymachine-reg-storeload-{p}-{c}", p = std::process::id()))
         };
         let _ = std::fs::remove_dir_all(&tmp);
 
@@ -376,7 +376,7 @@ mod tests {
     fn test_version_tracking() {
         let tmp = {
             let c = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            std::env::temp_dir().join(format!("tinyos-reg-version-{p}-{c}", p = std::process::id()))
+            std::env::temp_dir().join(format!("tinymachine-reg-version-{p}-{c}", p = std::process::id()))
         };
         let _ = std::fs::remove_dir_all(&tmp);
 
@@ -403,7 +403,7 @@ mod tests {
     fn test_has_snapshot() {
         let tmp = {
             let c = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-            std::env::temp_dir().join(format!("tinyos-reg-hassnap-{p}-{c}", p = std::process::id()))
+            std::env::temp_dir().join(format!("tinymachine-reg-hassnap-{p}-{c}", p = std::process::id()))
         };
         let _ = std::fs::remove_dir_all(&tmp);
 

@@ -15,10 +15,10 @@ set -euo pipefail
 # Layer types: base, runtime, pip, npm, cargo, apt, source
 # Build modes: host (fast, default), kvm (isolated sandbox)
 #
-# Output: ~/.tinyos/layers/<type>/<name>/<version>/layer.cpio.zst
+# Output: ~/.tinymachine/layers/<type>/<name>/<version>/layer.cpio.zst
 # ─────────────────────────────────────────────────────────────────────────────
 
-LAYERS_DIR="${HOME}/.tinyos/layers"
+LAYERS_DIR="${HOME}/.tinymachine/layers"
 BUILD_MODE="host"
 LAYER_TYPE=""
 LAYER_NAME=""
@@ -78,7 +78,7 @@ fi
 # ─── Setup paths ─────────────────────────────────────────────────────────────
 OUTPUT_DIR="${LAYERS_DIR}/${LAYER_TYPE}/${LAYER_NAME}/${LAYER_VERSION}"
 OUTPUT_FILE="${OUTPUT_DIR}/layer.cpio.zst"
-BUILD_DIR=$(mktemp -d -t "tinyos-layer-${LAYER_NAME}-${LAYER_VERSION}-XXXXXX")
+BUILD_DIR=$(mktemp -d -t "tinymachine-layer-${LAYER_NAME}-${LAYER_VERSION}-XXXXXX")
 
 # Ensure DESTDIR is exported so build scripts can use it
 export DESTDIR="${BUILD_DIR}/dest"
@@ -158,7 +158,7 @@ build_runtime() {
 
     local script_path=""
     # Look for build script in recipes directory
-    local recipe_dir="${HOME}/.tinyos/layers/recipes/${runtime}/${ver}"
+    local recipe_dir="${HOME}/.tinymachine/layers/recipes/${runtime}/${ver}"
     if [[ -f "${recipe_dir}/build.sh" ]]; then
         script_path="${recipe_dir}/build.sh"
     elif [[ -n "$BUILD_SCRIPT" ]]; then
@@ -244,7 +244,7 @@ case "$LAYER_TYPE" in
         info "Base layer: nothing to build (kernel + init.c + busybox)"
         # Base layers are pre-built, just create an empty marker
         mkdir -p "${DESTDIR}/etc"
-        echo "tinyos-base-${LAYER_VERSION}" > "${DESTDIR}/etc/tinyos-layer"
+        echo "tinymachine-base-${LAYER_VERSION}" > "${DESTDIR}/etc/tinymachine-layer"
         ;;
 esac
 
@@ -252,7 +252,7 @@ esac
 if [[ ! -d "$DESTDIR" ]] || [[ -z "$(ls -A "$DESTDIR" 2>/dev/null)" ]]; then
     echo "WARNING: DESTDIR is empty — creating minimal layer"
     mkdir -p "$DESTDIR/etc"
-    echo "${LAYER_TYPE}/${LAYER_NAME}@${LAYER_VERSION}" > "${DESTDIR}/etc/tinyos-layer"
+    echo "${LAYER_TYPE}/${LAYER_NAME}@${LAYER_VERSION}" > "${DESTDIR}/etc/tinymachine-layer"
 fi
 
 info "Creating cpio archive..."

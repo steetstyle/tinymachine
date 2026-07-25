@@ -26,7 +26,7 @@
 //!
 //! ## Reference Files
 //!
-//! Reference outputs are stored in `test/replay/` as JSON files:
+//! Reference outputs are stored in `tests/replay/` as JSON files:
 //!
 //! ```json
 //! {
@@ -45,7 +45,7 @@ use crate::kvm::Kvm;
 use crate::snapshot::Snapshot;
 
 /// Directory where reference outputs are stored, relative to crate root.
-const REPLAY_DIR: &str = "test/replay";
+const REPLAY_DIR: &str = "tests/replay";
 
 /// Name of the reference file for the default exec stub.
 const DEFAULT_REFS: &str = "exec-stub.json";

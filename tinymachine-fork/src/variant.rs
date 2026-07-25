@@ -358,7 +358,7 @@ impl Variant {
             kernel_profile: KernelProfile::GpuNvidia,
             needs_initrd: true,
             limits: ResourceLimits {
-                max_memory: 512 * 1024 * 1024, // 512 MB for tinygrad
+                max_memory: 3 * 1024 * 1024 * 1024, // 3 GB — initrd ~1.1GB uncompressed
                 max_cpu_ms: 300_000,            // 5 minutes
                 network_allowed: false,
                 gpu_required: true,
@@ -481,14 +481,15 @@ impl Variant {
 ///   MMIO hole at 4 GB).  The guest PCI allocator needs space for GPU
 ///   BARs in the 32-bit gap above RAM; 4 GB leaves no room, so we cap
 ///   memory at ~4 GB − 20 MB.
-/// * `tinygrad-nv` returns 768 MB because its initramfs is ~281 MB
-///   uncompressed.
+/// * `tinygrad-nv` returns 3 GB — its initramfs is ~1.1 GB
+///   uncompressed (NVIDIA firmware + modules + Python packages).
+///   tmpfs default max_size = 50% of RAM, so need RAM >= 2.2 GB.
 pub fn boot_memory_size_bytes(name: &str) -> u64 {
     match name {
         // Pytorch variants — cap below 4 GB IOAPIC hole
         "pytorch" | "pytorch-cpu" | "pytorch-nv" => 0xFEC00000,
-        // TinyGrad NV has a ~281 MB initramfs
-        "tinygrad-nv" => 768 * 1024 * 1024,
+        // TinyGrad NV has a ~1.1 GB initramfs
+        "tinygrad-nv" => 3 * 1024 * 1024 * 1024,  // 3 GB
         // Big initrd variants (~80-100 MB uncompressed, tmpfs needs room)
         "tinygrad" | "tinygrad-cpu" | "numpy" => 512 * 1024 * 1024,
         // Default for minimal / everything else
@@ -766,7 +767,7 @@ mod tests {
         assert!(v.needs_initrd);
         assert!(v.limits.gpu_required);
         assert!(!v.limits.network_allowed);
-        assert_eq!(v.limits.max_memory, 512 * 1024 * 1024);
+        assert_eq!(v.limits.max_memory, 3 * 1024 * 1024 * 1024);
         assert_eq!(v.pool_min, 0);
         assert_eq!(v.pool_max, 2);
     }

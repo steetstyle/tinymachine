@@ -39,8 +39,8 @@ set -euo pipefail
 
 # ─── Config defaults ──────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TINYOS_DIR="${HOME}/.tinyos/templates"
-KERNEL_BUILD_DIR="${BUILD_DIR:-/tmp/tinyos-kernel-build}"
+TINYMACHINE_DIR="${HOME}/.tinymachine/templates"
+KERNEL_BUILD_DIR="${BUILD_DIR:-/tmp/tinymachine-kernel-build}"
 KERNEL_VERSION="${KERNEL_VERSION:-7.1.4}"
 KERNEL_BZIMAGE="${KERNEL_BUILD_DIR}/linux-${KERNEL_VERSION}/arch/x86/boot/bzImage"
 VARIANT="minimal"
@@ -155,7 +155,7 @@ check_prereqs() {
         fi
     fi
 
-    local initrd="${TINYOS_DIR}/python/v1/${VARIANT}/initrd.zst"
+    local initrd="${TINYMACHINE_DIR}/python/v1/${VARIANT}/initrd.zst"
     if [ ! -f "$initrd" ]; then
         err "Initrd not found at $initrd"
         err "  Build: ./build-variant-initramfs.sh ${VARIANT}"
@@ -267,7 +267,7 @@ PYEOF
 
 # ─── Launch VM ───────────────────────────────────────────────────────
 launch_vm() {
-    local initrd="${TINYOS_DIR}/python/v1/${VARIANT}/initrd.zst"
+    local initrd="${TINYMACHINE_DIR}/python/v1/${VARIANT}/initrd.zst"
     local gpu_audio
     gpu_audio=$(get_gpu_audio_bdf "$GPU_BDF")
 

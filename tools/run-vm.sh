@@ -24,8 +24,8 @@ set -euo pipefail
 
 # ── Config ──
 # Always use /home/roy path (sudo changes HOME to /root)
-TINYOS_DIR="/home/roy/.tinyos/templates"
-KERNEL_DIR="${TINYOS_DIR}/kernel"
+TINYMACHINE_DIR="/home/roy/.tinymachine/templates"
+KERNEL_DIR="${TINYMACHINE_DIR}/kernel"
 VARIANT="${1:-tinygrad-nv}"
 GPU_BDF="${2:-}"
 
@@ -39,7 +39,7 @@ esac
 # ── Find kernel + initrd ──
 # Use bzImage (not vmlinux) — QEMU -kernel needs bzImage format
 VMLINUX="${KERNEL_DIR}/bzImage-gpu-nvidia"
-INITRD="${TINYOS_DIR}/python/v1/${VARIANT}/initrd.zst"
+INITRD="${TINYMACHINE_DIR}/python/v1/${VARIANT}/initrd.zst"
 
 if [ ! -f "$VMLINUX" ]; then
     echo "ERROR: Kernel not found at $VMLINUX"
@@ -72,7 +72,7 @@ if [ -z "$GPU_BDF" ] && [ "$VARIANT" != "minimal" ]; then
 fi
 
 # ── Kernel cmdline (MSI enabled) ──
-CMDLINE="pci=noearly acpi_irq_handling=off console=ttyS0 tinyos.qemu=1"
+CMDLINE="pci=noearly acpi_irq_handling=off console=ttyS0 tinymachine.qemu=1"
 
 if [ "$VARIANT" = "minimal" ]; then
     CMDLINE="$CMDLINE console=ttyS0"
@@ -113,7 +113,7 @@ QEMU_ARGS+=(
 )
 
 # Storage (if disk image exists)
-DISK_IMG="${TINYOS_DIR}/disk.img"
+DISK_IMG="${TINYMACHINE_DIR}/disk.img"
 if [ -f "$DISK_IMG" ]; then
     QEMU_ARGS+=(
         -drive file="$DISK_IMG",if=virtio,format=raw
@@ -121,7 +121,7 @@ if [ -f "$DISK_IMG" ]; then
 fi
 
 # ── Launch ──
-echo "=== TinyOS VM ==="
+echo "=== TinyMachine VM ==="
 echo "Variant:     $VARIANT"
 echo "Kernel:      $VMLINUX"
 echo "Initrd:      $INITRD"

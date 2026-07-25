@@ -16,7 +16,7 @@ Cargo.lock
 *.zst
 *.cpio
 
-# Local template registry (generated) — ~/.tinyos/templates/
+# Local template registry (generated) — ~/.tinymachine/templates/
 tinymachine-fork/templates/
 tools/initramfs/cpython/
 
@@ -33,3 +33,4 @@ tools/vbios/
 __pycache__/
 tools/initramfs/*.zst
 tools/initramfs/*.bin
+tinyos-fork/templates/python/v1/tinygrad-cpu/initrd

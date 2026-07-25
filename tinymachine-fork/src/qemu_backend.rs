@@ -123,17 +123,17 @@ fn read_dma_mask_bits(bdf: &str) -> Option<u32> {
     None
 }
 
-/// Path to the compiled `tinyos_dma_fix.ko` kernel module.
+/// Path to the compiled `tinymachine_dma_fix.ko` kernel module.
 ///
 /// This module calls `dma_set_mask(64)` on the NVIDIA GPU before vfio-pci
 /// binds, fixing the dma_mask_bits=32 kernel bug (BZ 217237) that causes
 /// VFIO_MAP_DMA to fail.
 ///
 /// The module is located relative to the project source tree. At runtime,
-/// the path can be overridden via the `TINYOS_DMA_FIX_KO` environment variable.
+/// the path can be overridden via the `TINYMACHINE_DMA_FIX_KO` environment variable.
 const DEFAULT_DMA_FIX_KO: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../tools/tinyos-dma-fix/tinyos_dma_fix.ko"
+    "/../tools/tinyos-dma-fix/tinymachine_dma_fix.ko"
 );
 
 /// Verify the VFIO GPU has dma_mask_bits >= 64.
@@ -144,7 +144,7 @@ const DEFAULT_DMA_FIX_KO: &str = concat!(
 ///
 /// This function:
 /// 1. Reads dma_mask_bits from sysfs for the VFIO-bound GPU
-/// 2. If < 64, tries to load the `tinyos_dma_fix.ko` kernel module
+/// 2. If < 64, tries to load the `tinymachine_dma_fix.ko` kernel module
 /// 3. Re-checks after loading
 /// 4. Returns a clear error with remediation steps if still < 64
 ///
@@ -190,10 +190,10 @@ fn ensure_dma_mask_64(bdf: &str) -> Result<()> {
 
     // ── Try to load the DMA fix kernel module ──
     //
-    // The tinyos_dma_fix.ko module calls dma_set_mask(64) on the GPU device.
+    // The tinymachine_dma_fix.ko module calls dma_set_mask(64) on the GPU device.
     // This must happen BEFORE vfio-pci probes the device. If vfio-pci is
     // already bound, we need to rebind after loading.
-    let ko_path = std::env::var("TINYOS_DMA_FIX_KO")
+    let ko_path = std::env::var("TINYMACHINE_DMA_FIX_KO")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_DMA_FIX_KO));
 
@@ -215,8 +215,8 @@ fn ensure_dma_mask_64(bdf: &str) -> Result<()> {
                 $ echo \"{bdf}\" | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind\n\
                 $ echo \"{bdf}\" | sudo tee /sys/bus/pci/drivers/vfio-pci/bind\n\
              \n\
-             Alternatively, set the TINYOS_DMA_FIX_KO environment variable to the\n\
-             path of a pre-built tinyos_dma_fix.ko.",
+             Alternatively, set the TINYMACHINE_DMA_FIX_KO environment variable to the\n\
+             path of a pre-built tinymachine_dma_fix.ko.",
             ko_path.to_string_lossy()
         )));
     }
@@ -257,7 +257,7 @@ fn ensure_dma_mask_64(bdf: &str) -> Result<()> {
 
     match status {
         Ok(s) if s.success() => {
-            info!("QemuBackend: tinyos_dma_fix loaded successfully — dma_mask should now be 64");
+            info!("QemuBackend: tinymachine_dma_fix loaded successfully — dma_mask should now be 64");
         }
         Ok(s) => {
             // insmod failed. This can happen if:
@@ -271,7 +271,7 @@ fn ensure_dma_mask_64(bdf: &str) -> Result<()> {
             // The guest nvidia.ko driver will set the proper 64-bit
             // DMA mask during GSP-RM init.
             warn!(
-                "QemuBackend: could not load tinyos_dma_fix for GPU {bdf} \
+                "QemuBackend: could not load tinymachine_dma_fix for GPU {bdf} \
                  (sudo insmod exited with code {}). Continuing with pci-hole64=64G \
                  workaround. Install the module at boot for optimal performance:\n\
                  $ sudo insmod {} domain={} bus={} slot={} func={}",
@@ -550,7 +550,7 @@ impl QemuBackend {
         cmd.arg("-netdev").arg("user,id=net0");
         cmd.arg("-device").arg("virtio-net-pci,netdev=net0");
 
-        // Storage: optional disk image at ~/.tinyos/templates/disk.img
+        // Storage: optional disk image at ~/.tinymachine/templates/disk.img
         let disk_img = Self::disk_image_path();
         if disk_img.exists() {
             cmd.arg("-drive")
@@ -935,15 +935,15 @@ impl QemuBackend {
 
     /// Find the VBIOS ROM file. Searches:
     /// 1. `tools/vbios/` relative to the current directory
-    /// 2. `~/.tinyos/vbios/`
+    /// 2. `~/.tinymachine/vbios/`
     fn find_vbios(name: &str) -> Option<PathBuf> {
         let candidates = {
             let mut v: Vec<PathBuf> = Vec::new();
             // tools/vbios/ relative to current dir
             v.push(PathBuf::from("tools").join("vbios").join(name));
-            // ~/.tinyos/vbios/
+            // ~/.tinymachine/vbios/
             if let Ok(home) = std::env::var("HOME") {
-                v.push(PathBuf::from(home).join(".tinyos").join("vbios").join(name));
+                v.push(PathBuf::from(home).join(".tinymachine").join("vbios").join(name));
             }
             v
         };
@@ -1064,9 +1064,9 @@ impl QemuBackend {
     /// Path to the optional QEMU disk image.
     fn disk_image_path() -> PathBuf {
         if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(home).join(".tinyos").join("templates").join("disk.img")
+            PathBuf::from(home).join(".tinymachine").join("templates").join("disk.img")
         } else {
-            PathBuf::from("/tmp/tinyos-disk.img")
+            PathBuf::from("/tmp/tinymachine-disk.img")
         }
     }
 }
@@ -1094,7 +1094,7 @@ impl SandboxBackend for QemuBackend {
         //
         // QEMU needs a bzImage (bootable kernel with standard boot header),
         // not a raw vmlinux ELF. The build-kernel.sh produces vmlinux-<profile>
-        // at ~/.tinyos/templates/kernel/. We look for bzImage-<profile> first,
+        // at ~/.tinymachine/templates/kernel/. We look for bzImage-<profile> first,
         // then fall back to vmlinux-<profile>.
         let kernel_vmlinux = crate::fresh_boot::FreshBootBackend::find_kernel_path(&fork_variant)
             .map_err(|e| ApiError::Config(format!("Kernel not found: {e}")))?;
@@ -1244,7 +1244,7 @@ impl SandboxBackend for QemuBackend {
         //    39-bit IOMMU boundary. This avoids VFIO_MAP_DMA: Invalid argument
         //    on Intel mobile platforms with 39-bit Host Address Width.
         //
-        // 2. tinyos_dma_fix.ko (see ensure_dma_mask_64): Sets dma_mask=64
+        // 2. tinymachine_dma_fix.ko (see ensure_dma_mask_64): Sets dma_mask=64
         //    on the VFIO-bound GPU to fix kernel BZ 217237. Loading this
         //    module requires sudo. If unavailable, pci-hole64=64G still
         //    avoids VFIO_MAP_DMA for BAR addresses.

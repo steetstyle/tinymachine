@@ -1,7 +1,7 @@
 //! TinyMachine Configuration — TOML config parsing + kernel cmdline parsing
 //!
 //! In binary mode, config is loaded from TOML files.
-//! In unikernel mode, config is loaded from kernel cmdline (`tinyos.*` params).
+//! In unikernel mode, config is loaded from kernel cmdline (`tinymachine.*` params).
 
 pub mod cmdline;
 
@@ -57,7 +57,7 @@ impl Default for TinyMachineConfig {
 
 fn default_template_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".tinyos").join("templates")
+    PathBuf::from(home).join(".tinymachine").join("templates")
 }
 
 /// Fork engine configuration
@@ -169,8 +169,8 @@ impl TinyMachineConfig {
     /// Load config from default locations
     pub fn load_default() -> Result<Self> {
         let paths: Vec<PathBuf> = vec![
-            PathBuf::from("tinyos.toml"),
-            PathBuf::from("/etc/tinyos/config.toml"),
+            PathBuf::from("tinymachine.toml"),
+            PathBuf::from("/etc/tinymachine/config.toml"),
         ]
         .into_iter()
         .chain(dirs_config_dir().map(|p| p.join("config.toml")))
@@ -213,7 +213,7 @@ impl TinyMachineConfig {
 }
 
 fn dirs_config_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config").join("tinyos"))
+    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config").join("tinymachine"))
 }
 
 #[cfg(test)]

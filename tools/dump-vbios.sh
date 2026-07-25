@@ -5,7 +5,7 @@
 #   BDF        — PCI BDF of the GPU (default: 0000:01:00.0)
 #   output.rom — output ROM file (default: tools/vbios/<vendor_device>.rom)
 #
-# The dumped ROM is also copied to ~/.tinyos/vbios/<vendor_device>.rom
+# The dumped ROM is also copied to ~/.tinymachine/vbios/<vendor_device>.rom
 # for FreshBootBackend VBIOS POST.
 #
 # Requires: gcc (on-the-fly compilation of ioctl helper)
@@ -76,7 +76,7 @@ echo "GPU vendor:device: $VENDOR_DEV"
 if [ -z "$OUTPUT" ]; then
     OUTPUT="$TOOLS_DIR/vbios/${VENDOR_DEV}.rom"
 fi
-mkdir -p "$(dirname "$OUTPUT")" "$HOME/.tinyos/vbios"
+mkdir -p "$(dirname "$OUTPUT")" "$HOME/.tinymachine/vbios"
 
 # ── Check if we already have a valid ROM ──
 if [ -f "$OUTPUT" ] && [ -s "$OUTPUT" ]; then
@@ -90,7 +90,7 @@ if [ -f "$OUTPUT" ] && [ -s "$OUTPUT" ]; then
 fi
 
 # ── Build the ioctl helper C program ──
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tinyos"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tinymachine"
 mkdir -p "$CACHE_DIR"
 HELPER="$CACHE_DIR/dump-vbios-helper"
 
@@ -247,8 +247,8 @@ if [ -f "$OUTPUT" ] && [ -s "$OUTPUT" ]; then
     echo "  Size:  $SIZE bytes"
     echo "  Sig:   0x$SIG"
 
-    # Copy to ~/.tinyos/vbios/
-    DEST_DIR="$HOME/.tinyos/vbios"
+    # Copy to ~/.tinymachine/vbios/
+    DEST_DIR="$HOME/.tinymachine/vbios"
     mkdir -p "$DEST_DIR"
     BASENAME=$(basename "$OUTPUT")
     cp "$OUTPUT" "$DEST_DIR/$BASENAME"
@@ -285,5 +285,5 @@ fi
 
 echo ""
 echo "=== Done ==="
-echo "FreshBootBackend will auto-detect this ROM in ~/.tinyos/vbios/"
+echo "FreshBootBackend will auto-detect this ROM in ~/.tinymachine/vbios/"
 echo "Test with: cargo test --test fresh_boot_vbios -- --nocapture"

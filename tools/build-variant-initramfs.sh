@@ -47,11 +47,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 VARIANT="${POSITIONAL[0]:-minimal}"
-OUTPUT_DIR="$(realpath -m "${POSITIONAL[1]:-$(dirname "$0")/../tinyos-fork/templates}")"
+OUTPUT_DIR="$(realpath -m "${POSITIONAL[1]:-$(dirname "$0")/../tinymachine-fork/templates}")"
 mkdir -p "$OUTPUT_DIR"
 TEMP_ROOT=$(mktemp -d)
 
-echo "=== TinyOS Variant Initramfs Builder ==="
+echo "=== TinyMachine Variant Initramfs Builder ==="
 echo "Variant:   $VARIANT"
 echo "Output:    $OUTPUT_DIR"
 echo "Source:    $([ "$FROM_SOURCE" = true ] && echo 'local git submodule' || echo 'download tarball')"
@@ -556,7 +556,7 @@ fi
 # For GPU passthrough, the guest needs kernel modules + GSP firmware blobs.
 NVIDIA_MODULES_SRC="$SCRIPT_DIR/initramfs/lib/modules"
 NVIDIA_FIRMWARE_SRC="$SCRIPT_DIR/initramfs/lib/firmware"
-FIRMWARE_DIR="${FIRMWARE_DIR:-/tmp/tinyos-firmware}"
+FIRMWARE_DIR="${FIRMWARE_DIR:-/tmp/tinymachine-firmware}"
 
 # GPU variants only: pytorch-nv and tinygrad-nv need NVIDIA firmware + modules.
 # CPU variants (numpy, tinygrad, tinygrad-cpu, pytorch, pytorch-cpu, minimal)
@@ -786,7 +786,7 @@ CLANG_STUB="$TEMP_ROOT/usr/bin/clang"
 if [ ! -f "$CLANG_STUB" ]; then
     cat > "$CLANG_STUB" << 'CLANG_EOF'
 #!/bin/sh
-echo "tinyos clang stub: clang not available in VFIO guest" >&2
+echo "tinymachine clang stub: clang not available in VFIO guest" >&2
 exit 1
 CLANG_EOF
     chmod +x "$CLANG_STUB"
@@ -915,7 +915,7 @@ find . -print0 | cpio --null -o -H newc --quiet 2>/dev/null | zstd -19 -T0 > "$O
 # Also generate .gz version for backward compatibility with tests
 zstd -dc "$OUTPUT_DIR/$VARIANT-initrd.zst" 2>/dev/null | gzip -c > "$OUTPUT_DIR/$VARIANT-initrd.gz" 2>/dev/null || true
 
-# Also save to variant-specific template directory for tinyos template build
+# Also save to variant-specific template directory for tinymachine template build
 TEMPLATE_DIR="$(realpath -m "$OUTPUT_DIR/../templates/python/v1/$VARIANT")"
 mkdir -p "$TEMPLATE_DIR"
     cp "$OUTPUT_DIR/$VARIANT-initrd.zst" "$TEMPLATE_DIR/initrd.zst" 2>/dev/null || true
@@ -923,13 +923,13 @@ mkdir -p "$TEMPLATE_DIR"
     # Also copy .gz version for test backward compat
     cp "$OUTPUT_DIR/$VARIANT-initrd.gz" "$TEMPLATE_DIR/initrd.gz" 2>/dev/null || true
 
-# Also copy to ~/.tinyos templates directory (CLI default path)
-TINYOS_HOME_DIR="$HOME/.tinyos/templates/python/v1/$VARIANT"
-if [ -d "$HOME/.tinyos" ]; then
-    mkdir -p "$TINYOS_HOME_DIR"
-    cp "$OUTPUT_DIR/$VARIANT-initrd.zst" "$TINYOS_HOME_DIR/initrd.zst" 2>/dev/null || true
-    cp "$OUTPUT_DIR/$VARIANT-initrd.gz" "$TINYOS_HOME_DIR/initrd.gz" 2>/dev/null || true
-    echo "Also copied to: $TINYOS_HOME_DIR/initrd.zst + .gz"
+# Also copy to ~/.tinymachine templates directory (CLI default path)
+TINYMACHINE_HOME_DIR="$HOME/.tinymachine/templates/python/v1/$VARIANT"
+if [ -d "$HOME/.tinymachine" ]; then
+    mkdir -p "$TINYMACHINE_HOME_DIR"
+    cp "$OUTPUT_DIR/$VARIANT-initrd.zst" "$TINYMACHINE_HOME_DIR/initrd.zst" 2>/dev/null || true
+    cp "$OUTPUT_DIR/$VARIANT-initrd.gz" "$TINYMACHINE_HOME_DIR/initrd.gz" 2>/dev/null || true
+    echo "Also copied to: $TINYMACHINE_HOME_DIR/initrd.zst + .gz"
 fi
 
 echo ""

@@ -21,10 +21,10 @@
 # Run: sudo bash test-tgrad-final.sh
 set -euo pipefail
 
-KERNEL="/home/roy/.tinyos/templates/kernel/bzImage-gpu-nvidia"
-INITRD="/home/roy/.tinyos/templates/python/v1/minimal/initrd.zst"
-VBIOS="/home/roy/.tinyos/vbios/Asus.RTX4080Mobile.12288.221219.rom"
-DMA_FIX_KO="/home/roy/github-projects/tinyos/tools/tinyos-dma-fix/tinyos_dma_fix.ko"
+KERNEL="/home/roy/.tinymachine/templates/kernel/bzImage-gpu-nvidia"
+INITRD="/home/roy/.tinymachine/templates/python/v1/minimal/initrd.zst"
+VBIOS="/home/roy/.tinymachine/vbios/Asus.RTX4080Mobile.12288.221219.rom"
+DMA_FIX_KO="/home/roy/github-projects/tinymachine/tools/tinyos-dma-fix/tinymachine_dma_fix.ko"
 CMDLINE="console=ttyS0 tinyos.qemu=1"
 LOG="/tmp/tgrad-final.log"
 FIFO="/tmp/tgrad-final-in"
@@ -45,7 +45,7 @@ echo ""
 # ── Fix 1: dma_mask_bits must be >= 64 for VFIO IOMMU mappings ──
 if [ "$DMA_MASK" != "64" ] && [ "$DMA_MASK" != "N/A" ]; then
     echo "⚠️  dma_mask_bits=$DMA_MASK — VFIO will reject DMA >4GB!"
-    echo "   Loading tinyos_dma_fix.ko to set dma_mask=64..."
+    echo "   Loading tinymachine_dma_fix.ko to set dma_mask=64..."
     if [ -f "$DMA_FIX_KO" ]; then
         sudo insmod "$DMA_FIX_KO" domain=0 bus=1 slot=0 func=0 verbose=1 || {
             echo "❌ Failed to load DMA fix module."
@@ -68,13 +68,13 @@ if [ "$DMA_MASK" != "64" ] && [ "$DMA_MASK" != "N/A" ]; then
         fi
         if [ "$NEW_MASK" != "64" ]; then
             echo "❌ Could not set dma_mask_bits to 64. Aborting."
-            echo "   Run: sudo dmesg | grep tinyos-dma-fix"
+            echo "   Run: sudo dmesg | grep tinymachine-dma-fix"
             exit 1
         fi
         echo "   ✅ dma_mask_bits now ${NEW_MASK}bit"
     else
         echo "❌ DMA fix module not found at $DMA_FIX_KO"
-        echo "   Build it: cd tools/tinyos-dma-fix && make"
+        echo "   Build it: cd tools/tinymachine-dma-fix && make"
         exit 1
     fi
 fi

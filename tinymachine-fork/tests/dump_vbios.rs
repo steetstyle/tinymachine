@@ -82,7 +82,7 @@ fn main() {
 
                     // Also copy to the expected location
                     let home = std::env::var("HOME").unwrap_or_default();
-                    let dest_dir = Path::new(&home).join(".tinyos").join("vbios");
+                    let dest_dir = Path::new(&home).join(".tinymachine").join("vbios");
                     fs::create_dir_all(&dest_dir).ok();
                     let dest_path = dest_dir.join("Asus.RTX4080Mobile.12288.221219.rom");
                     fs::write(&dest_path, rom_data).ok();

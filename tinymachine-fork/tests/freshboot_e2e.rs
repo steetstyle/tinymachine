@@ -4,8 +4,8 @@
 //! executes Python code, and reads output.
 //!
 //! Prerequisites:
-//!   - `~/.tinyos/templates/kernel/vmlinux-base` (Linux kernel)
-//!   - `~/.tinyos/templates/python/v1/minimal/initrd.gz` (initramfs with MicroPython)
+//!   - `~/.tinymachine/templates/kernel/vmlinux-base` (Linux kernel)
+//!   - `~/.tinymachine/templates/python/v1/minimal/initrd.gz` (initramfs with MicroPython)
 //!
 //! These are created by `tinyos template build python --variant minimal`.
 
@@ -27,8 +27,8 @@ fn home_dir() -> PathBuf {
 /// Runs on real hardware (CPU-only, no VFIO GPU passthrough).
 #[test]
 fn test_freshboot_e2e_cpu_boot() {
-    let kernel = home_dir().join(".tinyos/templates/kernel/vmlinux-base");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/minimal/initrd.gz");
+    let kernel = home_dir().join(".tinymachine/templates/kernel/vmlinux-base");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/minimal/initrd.gz");
 
     // Skip if templates aren't built (CI / fresh checkout)
     if !kernel.exists() || !initrd.exists() {
@@ -168,8 +168,8 @@ fn test_vfio_gpu_passthrough_detection() {
 ///
 /// Prerequisites:
 ///   - GPU bound to vfio-pci driver (see `scripts/gpu-switch.sh`)
-///   - `~/.tinyos/templates/kernel/vmlinux-gpu-vfio` (symlink to vmlinux-base OK)
-///   - `~/.tinyos/templates/python/v1/pytorch/initrd.gz` (pytorch variant initrd)
+///   - `~/.tinymachine/templates/kernel/vmlinux-gpu-vfio` (symlink to vmlinux-base OK)
+///   - `~/.tinymachine/templates/python/v1/pytorch/initrd.gz` (pytorch variant initrd)
 ///
 /// This test is `#[ignore]` by default because it requires real GPU hardware
 /// and takes ~10-15s. Run with: cargo test -- --include-ignored test_vfio_gpu
@@ -181,9 +181,9 @@ fn test_vfio_gpu_passthrough_boot() {
     use tinymachine_fork::vfio::{detect_gpu_devices, is_bound_to_vfio};
 
     // ── Prerequisites ──────────────────────────────────────────────
-    let kernel = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-nvidia");
-    let kernel_fallback = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-vfio");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/pytorch/initrd.gz");
+    let kernel = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-nvidia");
+    let kernel_fallback = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-vfio");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/pytorch/initrd.gz");
 
     // Prefer the new gpu-nvidia kernel (ACPI=y for nvidia.ko), fall back to gpu-vfio
     let _kernel_path = if kernel.exists() {
@@ -550,8 +550,8 @@ sys.stdout.flush()
 ///
 /// Prerequisites:
 ///   - GPU bound to vfio-pci driver
-///   - `~/.tinyos/templates/kernel/vmlinux-gpu-vfio`
-///   - `~/.tinyos/templates/python/v1/tinygrad-nv/initrd.gz`
+///   - `~/.tinymachine/templates/kernel/vmlinux-gpu-vfio`
+///   - `~/.tinymachine/templates/python/v1/tinygrad-nv/initrd.gz`
 ///
 /// This test is `#[ignore]` by default because it requires real GPU + VFIO.
 #[ignore]
@@ -562,8 +562,8 @@ fn test_tinygrad_nv_gpu_boot() {
     use tinymachine_fork::vfio::{detect_gpu_devices, is_bound_to_vfio};
 
     // ── Prerequisites ──────────────────────────────────────────────
-    let kernel = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-vfio");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/tinygrad-nv/initrd.gz");
+    let kernel = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-vfio");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/tinygrad-nv/initrd.gz");
 
     if !kernel.exists() {
         eprintln!("Skipping: vmlinux-gpu-vfio not found");
@@ -1230,10 +1230,10 @@ fn test_vfio_gpu_passthrough_profile() {
     use tinymachine_fork::fresh_boot::FreshBootBackend;
     use std::time::Instant;
 
-    let kernel_nvidia = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-nvidia");
-    let kernel_vfio = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-vfio");
+    let kernel_nvidia = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-nvidia");
+    let kernel_vfio = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-vfio");
     let kernel = if kernel_nvidia.exists() { kernel_nvidia } else { kernel_vfio };
-    let initrd = home_dir().join(".tinyos/templates/python/v1/pytorch/initrd.gz");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/pytorch/initrd.gz");
     if !kernel.exists() || !initrd.exists() {
         eprintln!("Skipping: templates not found");
         return;
@@ -1287,8 +1287,8 @@ fn test_vfio_gpu_passthrough_profile() {
 ///
 /// Prerequisites:
 ///   - GPU bound to vfio-pci driver (any NVIDIA Turing/Ampere/Ada/Blackwell)
-///   - `~/.tinyos/templates/kernel/vmlinux-gpu-vfio`
-///   - `~/.tinyos/templates/python/v1/tinygrad-nv/initrd.gz`
+///   - `~/.tinymachine/templates/kernel/vmlinux-gpu-vfio`
+///   - `~/.tinymachine/templates/python/v1/tinygrad-nv/initrd.gz`
 ///
 /// This test is `#[ignore]` by default because it requires real GPU + VFIO hardware.
 #[ignore]
@@ -1299,8 +1299,8 @@ fn test_tinygrad_nv_gpu_compute() {
     use tinymachine_fork::vfio::{detect_gpu_devices, is_bound_to_vfio};
 
     // ── Prerequisites ──────────────────────────────────────────────
-    let kernel = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-vfio");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/tinygrad-nv/initrd.gz");
+    let kernel = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-vfio");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/tinygrad-nv/initrd.gz");
 
     if !kernel.exists() {
         eprintln!("Skipping: vmlinux-gpu-vfio not found at {}", kernel.display());
@@ -1668,16 +1668,16 @@ print('compute_done', flush=True)
 /// Tests: Python bootstrap, import tinygrad, CPU tensor operations.
 ///
 /// Prerequisites:
-///   - `~/.tinyos/templates/kernel/vmlinux-base`
-///   - `~/.tinyos/templates/python/v1/tinygrad-cpu/initrd.gz`
+///   - `~/.tinymachine/templates/kernel/vmlinux-base`
+///   - `~/.tinymachine/templates/python/v1/tinygrad-cpu/initrd.gz`
 ///     (build: `bash tools/build-variant-initramfs.sh tinygrad-cpu`)
 #[test]
 fn test_tinygrad_cpu_only() {
     use tinymachine_api::sandbox::SandboxBackend;
     use tinymachine_fork::fresh_boot::FreshBootBackend;
 
-    let kernel = home_dir().join(".tinyos/templates/kernel/vmlinux-base");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/tinygrad-cpu/initrd.gz");
+    let kernel = home_dir().join(".tinymachine/templates/kernel/vmlinux-base");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/tinygrad-cpu/initrd.gz");
 
     if !kernel.exists() {
         eprintln!("SKIP: vmlinux-base not found");
@@ -1795,8 +1795,8 @@ print(f"TINYGRAD_CPU_OK", flush=True)
 ///
 /// Prerequisites:
 ///   - GPU bound to vfio-pci driver
-///   - `~/.tinyos/templates/kernel/vmlinux-gpu-nvidia` or vmlinux-gpu-vfio
-///   - `~/.tinyos/templates/python/v1/minimal/initrd.gz` (or pytorch)
+///   - `~/.tinymachine/templates/kernel/vmlinux-gpu-nvidia` or vmlinux-gpu-vfio
+///   - `~/.tinymachine/templates/python/v1/minimal/initrd.gz` (or pytorch)
 ///
 /// This test is `#[ignore]` by default because it requires real VFIO GPU hardware.
 #[ignore]
@@ -1807,9 +1807,9 @@ fn test_vfio_gpu_msi_routing() {
     use tinymachine_fork::vfio::{detect_gpu_devices, is_bound_to_vfio};
 
     // ── Prerequisites ──────────────────────────────────────────────
-    let kernel_vfio = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-vfio");
-    let kernel_nvidia = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-nvidia");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/minimal/initrd.gz");
+    let kernel_vfio = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-vfio");
+    let kernel_nvidia = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-nvidia");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/minimal/initrd.gz");
 
     let has_nvidia_kernel = kernel_nvidia.exists();
     let _kernel_path = if has_nvidia_kernel {
@@ -1989,8 +1989,8 @@ sys.stdout.flush()
 /// timeout on slow hardware. Test reports "timed out (expected)" in that case.
 ///
 /// Prerequisites:
-///   - `~/.tinyos/templates/kernel/vmlinux-base`
-///   - `~/.tinyos/templates/python/v1/pytorch-cpu/initrd.gz`
+///   - `~/.tinymachine/templates/kernel/vmlinux-base`
+///   - `~/.tinymachine/templates/python/v1/pytorch-cpu/initrd.gz`
 ///     (build: `bash tools/build-variant-initramfs.sh pytorch-cpu`)
 #[test]
 fn test_pytorch_cpu_only() {
@@ -1998,8 +1998,8 @@ fn test_pytorch_cpu_only() {
     use tinymachine_fork::fresh_boot::FreshBootBackend;
 
     // ── Prerequisites ──────────────────────────────────────────────
-    let kernel = home_dir().join(".tinyos/templates/kernel/vmlinux-base");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/pytorch-cpu/initrd.gz");
+    let kernel = home_dir().join(".tinymachine/templates/kernel/vmlinux-base");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/pytorch-cpu/initrd.gz");
 
     if !kernel.exists() {
         eprintln!("SKIP: vmlinux-base not found at {}", kernel.display());
@@ -2168,9 +2168,9 @@ fn test_vfio_gpu_gsp_handshake() {
     use tinymachine_fork::vfio::{detect_gpu_devices, is_bound_to_vfio};
 
     // ── Prerequisites ──────────────────────────────────────────────
-    let kernel = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-nvidia");
-    let kernel_fb = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-vfio");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/pytorch-nv/initrd.gz");
+    let kernel = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-nvidia");
+    let kernel_fb = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-vfio");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/pytorch-nv/initrd.gz");
 
     let kernel_path = if kernel.exists() {
         kernel
@@ -2346,9 +2346,9 @@ fn test_vfio_gpu_gsp_handshake_bench() {
     use std::time::Instant;
 
     // ── Prerequisites ──────────────────────────────────────────────
-    let kernel = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-nvidia");
-    let kernel_fb = home_dir().join(".tinyos/templates/kernel/vmlinux-gpu-vfio");
-    let initrd = home_dir().join(".tinyos/templates/python/v1/pytorch-nv/initrd.gz");
+    let kernel = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-nvidia");
+    let kernel_fb = home_dir().join(".tinymachine/templates/kernel/vmlinux-gpu-vfio");
+    let initrd = home_dir().join(".tinymachine/templates/python/v1/pytorch-nv/initrd.gz");
 
     let kernel_path = if kernel.exists() {
         kernel

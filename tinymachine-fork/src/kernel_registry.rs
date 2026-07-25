@@ -1,10 +1,10 @@
 //! Kernel Registry — manages versioned kernel binaries with integrity verification.
 //!
-//! TinyMachine kernels are stored under `~/.tinyos/templates/kernel/` with versioned
+//! TinyMachine kernels are stored under `~/.tinymachine/templates/kernel/` with versioned
 //! subdirectories:
 //!
 //! ```text
-//! ~/.tinyos/templates/kernel/
+//! ~/.tinymachine/templates/kernel/
 //! ├── v7.1.4/
 //! │   ├── vmlinux-base
 //! │   ├── vmlinux-gpu-vk
@@ -80,7 +80,7 @@ impl KernelRegistry {
     /// Get the default TinyMachine kernel directory path
     pub fn default_kernel_dir() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".tinyos").join("templates").join("kernel")
+        PathBuf::from(home).join(".tinymachine").join("templates").join("kernel")
     }
 
     /// Load the kernel registry from `registry.toml` in the kernel directory.

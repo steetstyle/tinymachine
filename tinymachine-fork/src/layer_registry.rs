@@ -319,7 +319,6 @@ fn extract_js_requires(code: &str) -> Vec<String> {
 
 /// Built-in import name to layer mapping — DEPRECATED.
 /// Use `LayerRegistry::find_layer_by_import()` instead.
-#[allow(dead_code)]
 pub fn import_to_pip_layer(import_name: &str) -> Option<&'static str> {
     match import_name {
         "numpy" | "scipy" | "pandas" | "matplotlib" => Some("numpy"),

@@ -55,5 +55,6 @@ pub fn test_snapshot() -> Snapshot {
         mem_fd: None,
         kernel_version: String::new(),
         kernel_hash: String::new(),
+        virtio_net_state: None,
     }
 }

@@ -86,6 +86,20 @@ pub const KVM_DEV_VFIO_GROUP: u32 = 1;
 pub const KVM_DEV_VFIO_GROUP_ADD: u64 = 1;
 pub const KVM_DEV_VFIO_GROUP_DEL: u64 = 2;
 
+/// KVM_GET_PIT2 — get in-kernel PIT state (struct kvm_pit_state2, 112 bytes)
+pub const KVM_GET_PIT2: u64 = 0x8070ae9fu64;
+
+/// KVM_SET_PIT2 — set in-kernel PIT state (struct kvm_pit_state2, 112 bytes)
+pub const KVM_SET_PIT2: u64 = 0x4070aea0u64;
+
+/// KVM_IRQ_LINE — assert/deassert an IRQ line (GSI)
+/// struct kvm_irq_level { union { __u32 irq; __s32 status; }; __u32 level; } = 8 bytes
+pub const KVM_IRQ_LINE: u64 = 0x4008ae61u64;
+
+/// KVM_SIGNAL_MSI — inject an MSI interrupt (bypasses IOAPIC, goes directly to LAPIC)
+/// struct kvm_msi { __u32 address_lo, address_hi, data, flags; __u8 devid; __u8 pad[11]; } = 32 bytes
+pub const KVM_SIGNAL_MSI: u64 = 0x4020aea5u64;
+
 /// KVM_IRQFD flags
 pub const KVM_IRQFD_FLAG_DEASSIGN: u32 = 1 << 0;
 pub const KVM_IRQFD_FLAG_RESAMPLE: u32 = 1 << 1;
@@ -150,6 +164,56 @@ impl MpState {
 }
 
 // ─── C-compatible structs for KVM ioctls (x86_64) ──────────────────
+
+/// C-compatible `struct kvm_pit_channel_state` (24 bytes)
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct KvmPitChannelState {
+    pub count: u32,
+    pub latched_count: u16,
+    pub count_latched: u8,
+    pub status_latched: u8,
+    pub status: u8,
+    pub read_state: u8,
+    pub write_state: u8,
+    pub write_latch: u8,
+    pub rw_mode: u8,
+    pub mode: u8,
+    pub bcd: u8,
+    pub gate: u8,
+    pub count_load_time: i64,
+}
+
+/// C-compatible `struct kvm_pit_state2` (112 bytes)
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub struct KvmPitState2 {
+    pub channels: [KvmPitChannelState; 3],
+    pub flags: u32,
+    pub reserved: [u32; 9],
+}
+
+/// C-compatible `struct kvm_irq_level` (8 bytes)
+/// Used by KVM_IRQ_LINE ioctl.
+#[derive(Debug, Clone, Default)]
+#[repr(C)]
+pub struct KvmIrqLevel {
+    pub irq: u32,
+    pub level: u32,
+}
+
+/// C-compatible `struct kvm_msi` (32 bytes)
+/// Used by KVM_SIGNAL_MSI ioctl.
+#[derive(Debug, Clone, Default)]
+#[repr(C)]
+pub struct KvmMsi {
+    pub address_lo: u32,
+    pub address_hi: u32,
+    pub data: u32,
+    pub flags: u32,
+    pub devid: u8,
+    pub pad: [u8; 11],
+}
 
 /// C-compatible `struct kvm_regs` (144 bytes on x86_64)
 #[derive(Debug, Clone, Default)]

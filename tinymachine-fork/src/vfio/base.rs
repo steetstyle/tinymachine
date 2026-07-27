@@ -10,7 +10,7 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
 use std::ptr;
 
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::vfio::backend::{detect_gpu_backend, GpuBackend};
 use crate::vfio::device::{
@@ -980,7 +980,7 @@ impl VfioPassthroughBase {
         };
 
         let mut slot = VFIO_BAR_SLOT_BASE;
-        let mut mapped_count = 0u32;
+        let mut _mapped_count = 0u32;
 
         for bar in &self.bar_regions {
             if bar.index > 5 || !bar.can_mmap || bar.size == 0 {
@@ -1056,6 +1056,30 @@ impl VfioPassthroughBase {
                 continue;
             }
 
+            // Diagnostic: read BAR0 via VFIO device fd pread AND via the mmap'd
+            // host pointer to verify both paths work. The mmap path is what KVM
+            // uses for EPT — if the mmap pointer is invalid, guest-side access
+            // (via KVM memory slot) will fail with EIO.
+            if bar.index == 0 {
+                let mut diag_buf = [0u8; 4];
+                let diag_ret = unsafe {
+                    libc::pread(dev_fd, diag_buf.as_mut_ptr() as *mut libc::c_void, 4, bar.offset as i64)
+                };
+                if diag_ret == 4 {
+                    let diag_val = u32::from_le_bytes(diag_buf);
+                    eprintln!("[VFIO] DIAG: host-side pread BAR0[0] via dev_fd = 0x{diag_val:08x} (pinned VFIO region)");
+                } else {
+                    eprintln!("[VFIO] DIAG: host-side pread BAR0[0] via dev_fd FAILED (ret={diag_ret})");
+                }
+                // Also try reading from the mmap pointer (with SIGBUS protection).
+                // Use a simple libc read to test if the mapping is functional.
+                let mmap_buf = unsafe {
+                    std::slice::from_raw_parts(host_ptr as *const u8, 4)
+                };
+                let mmap_val = u32::from_le_bytes([mmap_buf[0], mmap_buf[1], mmap_buf[2], mmap_buf[3]]);
+                eprintln!("[VFIO] DIAG: host-side mmap read BAR0[0] = 0x{mmap_val:08x} (IOMMU-backed mmap)");
+            }
+
             info!(
                 "VFIO: -> mapped BAR{} at guest GPA {:#x} via KVM slot {}",
                 bar.index, guest_phys, slot
@@ -1066,7 +1090,7 @@ impl VfioPassthroughBase {
                 size: bar.size,
                 host_ptr: host_ptr as *mut u8,
             });
-            mapped_count += 1;
+            _mapped_count += 1;
 
             slot += 1;
             if slot >= VFIO_BAR_SLOT_BASE + VFIO_MAX_BAR_SLOTS {

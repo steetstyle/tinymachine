@@ -23,8 +23,6 @@ use tinymachine_fork::boot::{self, BootConfig};
 use tinymachine_fork::kvm::Kvm;
 use tinymachine_fork::template_registry::TemplateRegistry;
 use tinymachine_fork::variant::{Variant, KernelProfile, ResourceLimits, boot_memory_size_bytes};
-use tinymachine_api::ExecutionTier;
-
 /// Recursively search upward from CWD for `tinymachine-fork/templates/`
 fn find_templates_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
@@ -63,6 +61,7 @@ fn main() {
     let mut variant_name = "minimal".to_string();
     let mut profile_name = "base".to_string();
     let mut memory_mb: Option<u64> = None;
+    let mut enable_network = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -76,9 +75,12 @@ fn main() {
                 i += 1;
                 memory_mb = Some(args[i].parse().expect("--memory-mb requires a number"));
             }
+            "--network" => {
+                enable_network = true;
+            }
             _ => {
                 eprintln!("Unknown arg: {}", args[i]);
-                eprintln!("Usage: build-snapshot --kernel <path> --initrd <path> [--lang python] [--variant minimal] [--profile base] [--memory-mb 512]");
+                eprintln!("Usage: build-snapshot --kernel <path> --initrd <path> [--lang python] [--variant minimal] [--profile base] [--memory-mb 512] [--network]");
                 std::process::exit(1);
             }
         }
@@ -152,6 +154,20 @@ fn main() {
         Some(mb) => mb * 1024 * 1024,
         None => boot_memory_size_bytes(&variant_name),
     };
+    // When --network is enabled, use a cmdline with PCI enabled
+    // (no pci=off). Otherwise use the default (which includes pci=off).
+    let cmdline = if enable_network {
+        Some(format!(
+            "console=ttyS0,115200 earlyprintk=serial,0x3f8,115200 \
+             acpi=off lpj=10000000 loglevel=4 rodata=off rdinit=/init \
+             iomem=relaxed random.trust_cpu=on idle=halt \
+             pci=conf1 pcie_port_pm=off \
+             ip=10.0.2.2::10.0.2.1:255.255.255.0::eth0:off"
+        ))
+    } else {
+        None
+    };
+
     let config = BootConfig {
         kernel_path: kernel,
         memory_size,
@@ -159,7 +175,7 @@ fn main() {
         initrd_path: Some(initrd),
         pvh_boot: true,
         irqchip: true,
-        cmdline: None,
+        cmdline,
         reserved_regions: Vec::new(),
         kernel_version: String::new(),
         kernel_hash: String::new(),
@@ -170,6 +186,37 @@ fn main() {
         boot::boot_linux(&kvm, &config).expect("boot_linux() failed")
     };
     eprintln!("OK ({:.1}s)", total_start.elapsed().as_secs_f64());
+
+    // ── Step 2b. Optional: virtio-net + TAP ──────────────────────────
+    // Set up networking before run_until_ready() so the guest kernel
+    // discovers the virtio-net PCI device during boot.
+    let _tap = if enable_network {
+        eprint!("Setting up virtio-net (TAP)... ");
+        match tinymachine_fork::net::tap::TapInterface::open("tap-tiny") {
+            Ok(tap) => {
+                let tap_fd = tap.fd();
+                let tap_name = tap.name.clone();
+                let _ = std::process::Command::new("ip")
+                    .args(["addr", "replace", "10.0.2.1/24", "dev", &tap_name])
+                    .output();
+                let _ = std::process::Command::new("ip")
+                    .args(["link", "set", &tap_name, "up"])
+                    .output();
+                let mmio_base = tinymachine_fork::arch::layout::VIRTIO_MMIO_ADDR as u32;
+                let mut vn = Box::new(tinymachine_fork::net::virtio_net_pci::VirtioNetPci::new(booted.memory_ptr, mmio_base));
+                vn.set_tap_fd(tap_fd);
+                booted.virtio_net = Some(std::cell::RefCell::new(vn));
+                eprintln!("OK (TAP={tap_name})");
+                Some(tap)
+            }
+            Err(e) => {
+                eprintln!("WARN (failed: {e})");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // ── Step 3: Wait for init READY ───────────────────────────────────
     eprint!("Waiting for init READY... ");

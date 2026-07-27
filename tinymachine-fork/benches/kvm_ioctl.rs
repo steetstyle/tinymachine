@@ -33,8 +33,6 @@ const KVM_SET_XCRS:             u64 = 0x4188aea7;
 const KVM_GET_XSAVE:            u64 = 0x8100aea4;
 const KVM_SET_XSAVE:            u64 = 0x4100aea5;
 const KVM_GET_CPUID2:           u64 = 0x8090ae91;
-#[allow(dead_code)]
-const KVM_SET_CPUID2:           u64 = 0x4090ae91;
 
 fn bench(name: &str, iterations: usize, mut f: impl FnMut()) {
     for _ in 0..10 { f(); } // warmup

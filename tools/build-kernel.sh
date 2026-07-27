@@ -472,6 +472,27 @@ CONFIG_PARTITION_ADVANCED=y
     # Sync and show final config state
     make olddefconfig 2>&1 | tail -3
 
+    # HACK: Ensure virtio-net is enabled (scripts/config --enable doesn't
+    # resolve dependency chains; VIRTIO_NET depends on VIRTIO which
+    # depends on VIRTIO_MENU, and these must be set explicitly).
+    if grep -q "^CONFIG_VIRTIO_NET=y" .config 2>/dev/null; then
+        : # Already enabled — good
+    else
+        # Attempt to force virtio-net via direct .config injection
+        # (olddefconfig will disable if deps can't be met, but they should be now)
+        echo "CONFIG_VIRTIO_MENU=y" >> .config
+        echo "CONFIG_VIRTIO=y" >> .config
+        echo "CONFIG_VIRTIO_PCI=y" >> .config
+        echo "CONFIG_VIRTIO_PCI_LEGACY=y" >> .config
+        echo "CONFIG_VIRTIO_NET=y" >> .config
+        make olddefconfig 2>&1 | tail -1
+        if grep -q "^CONFIG_VIRTIO_NET=y" .config; then
+            info "virtio-net forced enabled via direct .config injection"
+        else
+            warn "virtio-net could not be enabled (networking will not be available in guest)"
+        fi
+    fi
+
     # Show VFIO config if gpu-vfio or gpu-nvidia profile
     if [ "$profile" = "gpu-vfio" ] || [ "$profile" = "gpu-nvidia" ]; then
         info "VFIO config check:"

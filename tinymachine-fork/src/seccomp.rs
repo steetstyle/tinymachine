@@ -61,18 +61,18 @@ const SECCOMP_DATA_ARCH_OFF: u32 = 4;
 /// Seccomp BPF instruction as used by `struct sock_filter` in the kernel.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct BpfInsn {
-    code: u16,
-    jt: u8,
-    jf: u8,
-    k: u32,
+pub struct BpfInsn {
+    pub code: u16,
+    pub jt: u8,
+    pub jf: u8,
+    pub k: u32,
 }
 
 /// Seccomp BPF program as used by `struct sock_fprog` in the kernel.
 #[repr(C)]
-struct BpfProg {
-    len: u16,
-    filter: *const BpfInsn,
+pub struct BpfProg {
+    pub len: u16,
+    pub filter: *const BpfInsn,
 }
 
 // ─── BPF Program Builder ───────────────────────────────────────────────
@@ -151,11 +151,11 @@ impl BpfBuilder {
 /// [4]  JEQ A, SYS_R, jt_0, 1            ; if match → skip to ALLOW; else → [5]
 /// [5]  JEQ A, SYS_W, jt_1, 1            ; ...
 /// ...  ...
-/// [N]  JEQ A, SYS_L, 1, 1               ; last: match→ALLOW, miss→DENY
-/// [N+1] RET ERRNO(EACCES)                ; DENY
-/// [N+2] RET ALLOW                        ; ALLOW
+/// [N]  JEQ A, SYS_L, 1, 0               ; last: match→ALLOW, miss→DENY
+/// [N+1] RET ALLOW                       ; ALLOW
+/// [N+2] RET ERRNO(EACCES)               ; DENY
 /// ```
-fn build_bpf(allowlist: &[i64]) -> (Vec<BpfInsn>, BpfProg) {
+pub fn build_bpf(allowlist: &[i64]) -> (Vec<BpfInsn>, BpfProg) {
     let mut b = BpfBuilder::new();
 
     // Step 1: Load and verify architecture
@@ -173,26 +173,27 @@ fn build_bpf(allowlist: &[i64]) -> (Vec<BpfInsn>, BpfProg) {
     //   3 (preamble: LD_ARCH, JEQ_ARCH, KILL)
     // + 1 (LD_NR)
     // + num_checks (JEQ checks)
-    // + 1 (DENY)
-    // = 5 + num_checks
-    let allow_pos: u16 = 5 + num_checks as u16; // 0-indexed position of ALLOW instr
+    // + 0 (ALLOW comes before DENY)
+    // = 4 + num_checks
+    let allow_pos: u16 = 4 + num_checks as u16; // 0-indexed position of ALLOW instr
 
     for (i, &sysno) in allowlist.iter().enumerate() {
         // Current instruction index (0-indexed from start of BPF):
         let cur_idx: u16 = 4 + i as u16; // after LD_ARCH(0) + JEQ_ARCH(1) + KILL(2) + LD_NR(3)
         // If match: jump from cur_idx+1 to allow_pos: jt = allow_pos - (cur_idx + 1)
         let jt = (allow_pos - cur_idx - 1) as u8;
-        // If no match: jump 1 instruction forward (to next check)
-        let jf: u8 = 1;
+        // If no match: jump 1 instruction forward (to next check),
+        // except for the last check which falls through to DENY.
+        let jf: u8 = if i == num_checks - 1 { 0 } else { 1 };
         b.jeq(sysno as u32, jt, jf);
     }
 
-    // Step 4: DENY — syscall not in allowlist, return EACCES
+    // Step 4: ALLOW — syscall is in allowlist
+    b.ret(libc::SECCOMP_RET_ALLOW);
+
+    // Step 5: DENY — syscall not in allowlist, return EACCES
     let errno_eacces = libc::EACCES as u32;
     b.ret(libc::SECCOMP_RET_ERRNO | errno_eacces);
-
-    // Step 5: ALLOW — syscall is in allowlist
-    b.ret(libc::SECCOMP_RET_ALLOW);
 
     b.build()
 }
@@ -266,6 +267,7 @@ fn allowlist(backend: BackendType) -> &'static [i64] {
             libc::SYS_setitimer,    // setitimer for READY polling interval
             libc::SYS_madvise,      // huge page hints (MADV_HUGEPAGE)
             libc::SYS_getrandom,    // host entropy for CRNG divergence per-fork
+            libc::SYS_dup,          // dup TAP fd for virtio-net (dup before fork)
         ],
 
         // ── HostGpuBackend (Tier S) ───────────────────────────────────
@@ -414,6 +416,9 @@ fn allowlist(backend: BackendType) -> &'static [i64] {
 /// Panics if the allowlist for the given backend is empty (the process
 /// would immediately die on any syscall).
 pub fn install(backend: BackendType) -> io::Result<()> {
+    // Debug: confirm seccomp_install is called
+    unsafe { libc::write(2, b"SECCOMP_INSTALL_ENTER\n" as *const u8 as *const libc::c_void, 22); }
+
     let list = allowlist(backend);
 
     if list.is_empty() {
@@ -437,6 +442,18 @@ pub fn install(backend: BackendType) -> io::Result<()> {
     // Step 2: Build the BPF program for this backend's allowlist.
     let (_insns, prog) = build_bpf(list);
 
+    // Debug: dump the BPF program for KvmFork
+    if let BackendType::KvmFork = backend {
+        let insns = &_insns;
+        let msg = format!("SECCOMP BPF {} insns for KvmFork:\n", insns.len());
+        unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()); }
+        for (i, insn) in insns.iter().enumerate() {
+            let msg = format!("  [{i:3}] code=0x{:04x} jt={:3} jf={:3} k=0x{:08x} ({})\n",
+                insn.code, insn.jt, insn.jf, insn.k, insn.k);
+            unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()); }
+        }
+    }
+
     // Step 3: Install the seccomp filter.
     // SAFETY:
     // - `BpfProg` layout matches `struct sock_fprog`.
@@ -452,9 +469,11 @@ pub fn install(backend: BackendType) -> io::Result<()> {
         )
     };
     if ret != 0 {
+        unsafe { libc::write(2, b"SECCOMP_INSTALL_FAILED\n" as *const u8 as *const libc::c_void, 24); }
         return Err(io::Error::last_os_error());
     }
 
+    unsafe { libc::write(2, b"SECCOMP_INSTALL_OK\n" as *const u8 as *const libc::c_void, 20); }
     Ok(())
 }
 

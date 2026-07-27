@@ -31,6 +31,10 @@
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <linux/random.h>
 #include <dirent.h>
 #include <errno.h>
@@ -1295,6 +1299,73 @@ int main(int argc, char *argv[]) {
     ready[5] = 0;
     // Serial write to produce VM exit so host detects READY
     syscall(SYS_write, 1, "\n", 1);
+
+    // ── Network configuration from kernel cmdline ──────────────────
+    // Without CONFIG_IP_PNP the kernel ip= cmdline is ignored, so init.c
+    // configures the interface via raw ioctl (no busybox dependencies).
+    {
+        int net_fd2 = open("/proc/cmdline", O_RDONLY);
+        if (net_fd2 >= 0) {
+            char net_buf[1024];
+            int n2 = read(net_fd2, net_buf, sizeof(net_buf) - 1);
+            close(net_fd2);
+            if (n2 > 0) {
+                net_buf[n2] = 0;
+                char *ip_p2 = strstr(net_buf, "ip=");
+                if (ip_p2) {
+                    char *p2 = ip_p2 + 3;
+                    char client2[64] = {0}, gw2[64] = {0}, nm2[64] = {0}, dev2[64] = {0};
+                    int i2;
+                    for (i2 = 0; *p2 && *p2 != ':' && i2 < 63;) client2[i2++] = *p2++;
+                    if (*p2) p2++;
+                    for (; *p2 && *p2 != ':';) p2++;
+                    if (*p2) p2++;
+                    for (i2 = 0; *p2 && *p2 != ':' && i2 < 63;) gw2[i2++] = *p2++;
+                    if (*p2) p2++;
+                    for (i2 = 0; *p2 && *p2 != ':' && i2 < 63;) nm2[i2++] = *p2++;
+                    if (*p2) p2++;
+                    for (; *p2 && *p2 != ':';) p2++;
+                    if (*p2) p2++;
+                    for (i2 = 0; *p2 && *p2 != ':' && *p2 != ' ' && i2 < 63;) dev2[i2++] = *p2++;
+
+                    if (client2[0] && dev2[0]) {
+                        int sock2 = socket(AF_INET, SOCK_DGRAM, 0);
+                        if (sock2 >= 0) {
+                            struct ifreq ifr2;
+                            struct sockaddr_in *sin2;
+
+                            // Set IP address
+                            memset(&ifr2, 0, sizeof(ifr2));
+                            strncpy(ifr2.ifr_name, dev2, IFNAMSIZ - 1);
+                            sin2 = (struct sockaddr_in *)&ifr2.ifr_addr;
+                            sin2->sin_family = AF_INET;
+                            sin2->sin_addr.s_addr = inet_addr(client2);
+                            ioctl(sock2, SIOCSIFADDR, &ifr2);
+
+                            // Set netmask
+                            if (nm2[0]) {
+                                memset(&ifr2, 0, sizeof(ifr2));
+                                strncpy(ifr2.ifr_name, dev2, IFNAMSIZ - 1);
+                                sin2 = (struct sockaddr_in *)&ifr2.ifr_netmask;
+                                sin2->sin_family = AF_INET;
+                                sin2->sin_addr.s_addr = inet_addr(nm2);
+                                ioctl(sock2, SIOCSIFNETMASK, &ifr2);
+                            }
+
+                            // Bring up
+                            memset(&ifr2, 0, sizeof(ifr2));
+                            strncpy(ifr2.ifr_name, dev2, IFNAMSIZ - 1);
+                            ioctl(sock2, SIOCGIFFLAGS, &ifr2);
+                            ifr2.ifr_flags |= IFF_UP;
+                            ioctl(sock2, SIOCSIFFLAGS, &ifr2);
+
+                            close(sock2);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // ── Busy-polling loop ──
     while (1) {

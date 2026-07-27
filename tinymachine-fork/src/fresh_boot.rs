@@ -34,6 +34,8 @@ use tracing::{debug, info, trace, warn};
 
 use crate::arch::*;
 use crate::boot::{self, BootConfig, BootedVm, ReservedRegion, VfioMmioInfo, VfioPciInfo};
+use crate::net::virtio_net_pci::VirtioNetPci;
+use crate::net::tap::TapInterface;
 use crate::pci_root_port::PcieRootPort;
 use crate::kvm::Kvm;
 use crate::variant::Variant;
@@ -192,6 +194,8 @@ pub struct FreshBootBackend {
     /// When `Some`, this value is used instead of `variant::boot_memory_size_bytes()`.
     /// Set this before calling `init()`.
     pub memory_size_override: Option<u64>,
+    /// Optional TAP interface for guest networking
+    tap: Option<TapInterface>,
 }
 
 impl FreshBootBackend {
@@ -211,6 +215,7 @@ impl FreshBootBackend {
             modules_loaded: false,
             capture_snapshot: false,
             memory_size_override: None,
+            tap: None,
         }
     }
 
@@ -754,7 +759,7 @@ impl SandboxBackend for FreshBootBackend {
                     // pci=conf1: force legacy I/O port config access (our proxy).
                     // The alternative (MMIO/ECAM) bypasses our proxy and sees
                     // stale (pre-restoration) BAR values.
-                    Some(crate::arch::boot::build_kernel_cmdline(3, "pci=noearly acpi_irq_handling=off pcie_port_pm=off pci=conf1"))
+                    Some(crate::arch::boot::build_kernel_cmdline(3, "acpi=off pcie_port_pm=off pci=conf1"))
                 }
                 _ => {
                     // Base (CPU-only): minimal cmdline, no GPU params needed.
@@ -764,6 +769,16 @@ impl SandboxBackend for FreshBootBackend {
         } else {
             None // Use default (includes pci=off)
         };
+
+        // For network-enabled variants, configure static IP on kernel cmdline.
+        // The TAP host is at 10.0.2.1, guest gets 10.0.2.2.
+        let cmdline = cmdline.map(|c| {
+            if variant.limits.network_allowed {
+                format!("{} ip=10.0.2.2::10.0.2.1:255.255.255.0::eth0:off", c)
+            } else {
+                c
+            }
+        });
 
         // For GPU variants, reserve GPU BAR regions that overlap with guest RAM
         // so the E820 table excludes them. Read BAR addresses from sysfs
@@ -1037,6 +1052,16 @@ impl SandboxBackend for FreshBootBackend {
                         let no_mem = (old_cmd as u16 & !0x2) as u32;
                         unsafe { libc::pwrite(dev_fd, &no_mem as *const u32 as *const libc::c_void, 4, cmd_off as i64); }
                     }
+                    // Log current (VBIOS-changed) BAR values before restoration
+                    for bar_idx in 0u32..6 {
+                        let bar_off = cfg_off + 0x10 + bar_idx as u64 * 4;
+                        let mut v: u32 = 0;
+                        if unsafe { libc::pread(dev_fd, &mut v as *mut u32 as *mut libc::c_void, 4, bar_off as i64) } == 4 {
+                            if v != 0 {
+                                eprintln!("[FRESHBOOT] BAR{bar_idx} before restore: dev_fd_read=0x{v:08x}");
+                            }
+                        }
+                    }
                     match vfio_after.preassign_guest_bar_addresses() {
                         Ok(assignments) => {
                             for (idx, addr, _sz) in &assignments {
@@ -1124,6 +1149,46 @@ impl SandboxBackend for FreshBootBackend {
             // register MSI eventfds. The guest kernel enables MSI during PCI
             // probe (before our first exec returns), so the post-exec setup
             // in setup_msi_routing() can successfully register MSI irqfds.
+        }
+
+        // ── 4c. Network: virtio-net-pci + TAP ─────────────────────────
+        // Create a TAP interface and attach a virtio-net device so the
+        // guest has network access (for firmware download, pip install, etc.)
+        //
+        // This is done BEFORE run_until_ready() so the guest kernel's PCI
+        // scan finds the virtio-net device during boot.
+        if variant.limits.network_allowed {
+            match TapInterface::open("tap-tiny") {
+                Ok(tap) => {
+                    let tap_fd = tap.fd();
+                    let tap_name = tap.name.clone();
+
+                    // Configure TAP from the host side: assign IP + bring up.
+                    // Requires CAP_NET_ADMIN (set on the binary via setcap).
+                    let tap_ip = "10.0.2.1/24";
+                    let _ = std::process::Command::new("ip")
+                        .args(["addr", "replace", tap_ip, "dev", &tap_name])
+                        .output();
+                    let _ = std::process::Command::new("ip")
+                        .args(["link", "set", &tap_name, "up"])
+                        .output();
+
+                    let mmio_base = layout::VIRTIO_MMIO_ADDR as u32;
+                    let mut virtio_net = Box::new(VirtioNetPci::new(booted.memory_ptr, mmio_base));
+                    virtio_net.set_tap_fd(tap_fd);
+                    info!(
+                        "FreshBoot: virtio-net enabled (TAP={}, fd={}, ip={})",
+                        tap_name, tap_fd, tap_ip
+                    );
+                    booted.virtio_net = Some(RefCell::new(virtio_net));
+                    self.tap = Some(tap);
+                }
+                Err(e) => {
+                    warn!("FreshBoot: failed to create TAP interface (continuing without network): {e}");
+                }
+            }
+        } else {
+            info!("FreshBoot: network not allowed by variant (skipping)");
         }
 
         // ── Snapshot capture (optional) ──────────────────────────────

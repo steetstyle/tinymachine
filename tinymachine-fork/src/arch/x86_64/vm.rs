@@ -76,6 +76,57 @@ pub fn create_pit(vm_fd: RawFd) -> Result<()> {
     Ok(())
 }
 
+/// Configure the in-kernel PIT channel 0 for periodic timer interrupts.
+///
+/// Called after `create_pit()` to start the PIT timer when the guest
+/// does not program PIT ports (which are intercepted and ignored by the
+/// fork I/O handler). Without this, the PIT never fires and the guest
+/// gets no timer interrupts, causing HLT to block forever.
+///
+/// channel 0: counter=11932 (~100 Hz), mode 3 (square wave), gate=enabled.
+/// The PIT clock is 1,193,182 Hz; counter = 1193182 / 100 = 11931.82 ≈ 11932.
+///
+/// # Errors
+/// Returns `KvmError::Ioctl` if KVM_SET_PIT2 fails.
+pub fn set_pit2(vm_fd: RawFd) -> Result<()> {
+    let ch0 = KvmPitChannelState {
+        count: 11932,
+        latched_count: 0,
+        count_latched: 0,
+        status_latched: 0,
+        status: 0,
+        read_state: 0,
+        write_state: 3,     // LSB then MSB
+        write_latch: 0,
+        rw_mode: 3,         // low then high byte
+        mode: 3,            // square wave
+        bcd: 0,
+        gate: 1,
+        count_load_time: 0,
+    };
+    let ch1 = KvmPitChannelState { count: 0, ..ch0 };
+    let ch2 = KvmPitChannelState { count: 0, ..ch0 };
+    let state = KvmPitState2 {
+        channels: [ch0, ch1, ch2],
+        flags: 0,
+        reserved: [0u32; 9],
+    };
+    let ret = unsafe {
+        libc::ioctl(
+            vm_fd,
+            KVM_SET_PIT2 as libc::c_ulong,
+            &state as *const _ as *const libc::c_void,
+        )
+    };
+    if ret < 0 {
+        return Err(KvmError::Ioctl {
+            context: "KVM_SET_PIT2".into(),
+            errno: errno_after_ioctl(),
+        });
+    }
+    Ok(())
+}
+
 // ─── Irqchip state save/restore ───────────────────────────────────
 
 /// Save the state of one in-kernel irqchip (PIC master, PIC slave, or IOAPIC)

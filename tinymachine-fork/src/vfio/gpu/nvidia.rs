@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::vfio::backend::GpuBackend;
 use crate::vfio::base::VfioPassthroughBase;
@@ -40,10 +40,7 @@ enum GspError {
     InvalidMagic(u32),
     #[error("BAR0 mmap failed")]
     Bar0MmapFailed,
-    #[error("IMEM write failed at word {0}")]
-    ImemWriteFailed(usize),
-    #[error("Falcon did not start (CPUCTL=0x{0:08x})")]
-    FalconStartFailed(u32),
+
     #[error("Falcon engine reset failed")]
     EngineResetFailed,
     #[error("Decompression error: {0}")]
@@ -174,7 +171,7 @@ fn gpu_power_preinit(base: &VfioPassthroughBase) -> std::result::Result<(), Vfio
     try_power_gate_ctrl(bar0_ptr)?;
 
     // Also try PMC register writes via VFIO fd pwrite
-    for &(name, reg_off, write_val) in &[
+    for &(_name, reg_off, write_val) in &[
         ("NV_PMC_ENABLE", 0x200u64, 0x40000102u32),
         ("NV_PMC_PG_CTRL_EXT", 0x20cu64, 0x2000010cu32),
     ] {
@@ -434,7 +431,7 @@ unsafe fn gsp_load_inner(bar0_ptr: *mut u8, bar0_size: usize) -> std::result::Re
     }
 
     // Wait for Falcon to settle after reset
-    for attempt in 0..20 {
+    for _attempt in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let hwcfg2_now = unsafe {
             std::ptr::read_volatile(bar0_ptr.add(GSP_BASE + HWCFG2) as *const u32)

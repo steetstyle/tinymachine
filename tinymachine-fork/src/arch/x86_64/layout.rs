@@ -95,6 +95,13 @@ pub const READY_SIGNAL_OFFSET: u64 = 4090;
 /// KVM_SET_TSS_ADDR value — conventional near top of 32-bit space
 pub const TSS_ADDR: u64 = 0xffffd000;
 
+/// Guest physical address of the virtio-net PCI MMIO BAR.
+/// Placed in the PCI MMIO hole (above 64MB RAM, below 4GB).
+pub const VIRTIO_MMIO_ADDR: u64 = 0xFEBF0000;
+
+/// Size of the virtio-net PCI MMIO BAR (4KB — standard page)
+pub const VIRTIO_MMIO_SIZE: u64 = 0x1000;
+
 /// Reserved MMIO regions that must not overlap with guest memory.
 /// - 0xFEC00000 — IOAPIC (1 page)
 /// - 0xFEE00000 — LAPIC (1 page)

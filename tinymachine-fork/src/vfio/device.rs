@@ -1,6 +1,5 @@
 //! VFIO type definitions — device info, BAR info, MSI config, errors
 
-use std::os::fd::RawFd;
 use thiserror::Error;
 
 // ─── VFIO ioctl constants (from linux/vfio.h) ──────────────────────
@@ -8,8 +7,6 @@ use thiserror::Error;
 // VFIO_TYPE = ';' = 0x3B, VFIO_BASE = 100 = 0x64
 // _IO(type, nr) = (0 << 30) | (0 << 16) | (type << 8) | nr
 pub(crate) const VFIO_GET_API_VERSION: u64 = 0x003B64;
-#[allow(dead_code)]
-pub(crate) const VFIO_CHECK_EXTENSION: u64 = 0x003B65;
 pub(crate) const VFIO_SET_IOMMU: u64 = 0x003B66;
 pub(crate) const VFIO_GROUP_SET_CONTAINER: u64 = 0x003B68;
 pub(crate) const VFIO_GROUP_GET_DEVICE_FD: u64 = 0x003B6A;
@@ -20,17 +17,10 @@ pub(crate) const VFIO_DEVICE_RESET: u64 = 0x003B6F;
 
 // ─── VFIO interrupt routing constants ───────────────────────────────
 pub(crate) const VFIO_PCI_INTX_IRQ_INDEX: u32 = 0;
-#[allow(dead_code)]
 pub(crate) const VFIO_PCI_MSI_IRQ_INDEX: u32 = 1;
 
 pub(crate) const VFIO_IRQ_SET_DATA_NONE: u32 = 1 << 0;
-#[allow(dead_code)]
-pub(crate) const VFIO_IRQ_SET_DATA_BOOL: u32 = 1 << 1;
 pub(crate) const VFIO_IRQ_SET_DATA_EVENTFD: u32 = 1 << 2;
-#[allow(dead_code)]
-pub(crate) const VFIO_IRQ_SET_ACTION_MASK: u32 = 1 << 3;
-#[allow(dead_code)]
-pub(crate) const VFIO_IRQ_SET_ACTION_UNMASK: u32 = 1 << 4;
 pub(crate) const VFIO_IRQ_SET_ACTION_TRIGGER: u32 = 1 << 5;
 
 // ─── VFIO region info flags ─────────────────────────────────────────

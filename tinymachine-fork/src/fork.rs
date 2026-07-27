@@ -10,6 +10,7 @@
 //! 4. KVM_CREATE_VCPU + restore CPU state
 //! 5. KVM_RUN → code executes in a fresh sandbox
 
+use std::cell::RefCell;
 use std::os::unix::io::AsRawFd;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +21,7 @@ use tracing::{info, trace};
 use crate::arch::*;
 use crate::arch::port::Uart16550;
 use crate::kvm::{self, Kvm, Vm, Vcpu, KvmCpuidEntry2Raw};
+use crate::net::virtio_net_pci::VirtioNetPci;
 use crate::shared_mem::SharedMemoryRegion;
 use crate::snapshot::Snapshot;
 use crate::serial::SerialPort;
@@ -121,11 +123,19 @@ pub struct ForkedVm {
     /// If false, HLT is treated as completion (return Ok(())).
     /// Set `true` for post-boot kernels with init, `false` for stubs.
     pub post_boot: bool,
+    /// If true, KVM_CREATE_IRQCHIP was called (in-kernel irqchip is active).
+    /// When true, use set_irq_line() instead of signal_lapic_irq() for
+    /// interrupt delivery, as KVM_SET_VCPU_EVENTS interrupt injection is
+    /// silently ignored and may cause VMENTRY failures.
+    pub enable_irqchip: bool,
     /// If true (default), inject 64 bytes of host CSPRNG into ENTROPY_BUF_PHYS
     /// before each KVM_RUN so that each fork diverges the kernel CRNG differently.
     /// If false, write zeros instead — all forks start with identical CRNG state.
     /// Set to `false` via `--measure` flag for CRNG decorrelation experiments.
     pub entropy_divergence: bool,
+    /// Optional virtio-net device for network support.
+    /// When present, MMIO exits in VIRTIO_MMIO_ADDR range are dispatched to it.
+    pub virtio_net: Option<RefCell<VirtioNetPci>>,
 }
 
 // SAFETY:
@@ -268,11 +278,48 @@ impl ForkedVm {
                 });
             }
 
+            // Drain TAP fd before each KVM_RUN so the guest sees fresh data.
+            if let Some(net) = self.virtio_net.as_ref() {
+                let mut net = net.borrow_mut();
+                let was_read = net.isr;
+                net.try_rx();
+                if net.isr != was_read {
+                    if self.enable_irqchip {
+                        vcpu.inject_lapic_irq(0x3b);
+                    }
+                }
+            }
+
             let ret = unsafe { vcpu.run()? };
+            // Clear LAPIC ISR for vector 0x3B after every KVM_RUN to unblock
+            // the timer (same priority class 3) and enable re-delivery.
+            // With PIC-only routing the guest never sends LAPIC EOI.
+            if self.enable_irqchip {
+                vcpu.clear_lapic_isr(0x3b);
+            }
+
             if ret == libc::EINTR {
                 // SIGALRM tick — check READY
                 if SIGNAL_INTERRUPTED.swap(false, Ordering::SeqCst) {
                     tick_count += 1;
+
+                    // On every timer tick, try virtio RX polling to drain TAP fd.
+                    if tick_count < 5 || tick_count.is_multiple_of(500) {
+                        tracing::info!("FORK TICK #{} elapsed={:?}", tick_count, start.elapsed());
+                    }
+                    if let Some(net) = self.virtio_net.as_ref() {
+                        let mut net = net.borrow_mut();
+                        let was_read = net.isr;
+                        net.try_rx();
+                        if net.isr != was_read {
+                            if self.enable_irqchip {
+                                vcpu.inject_lapic_irq(0x3b);
+                            } else {
+                                let _ = vcpu.signal_lapic_irq(0x3b);
+                            }
+                        }
+                    }
+
                     // Periodic progress logging every 1000 ticks (~500ms)
                     if tick_count.is_multiple_of(1000) {
                         if let Ok(r) = vcpu.get_regs() {
@@ -293,8 +340,9 @@ impl ForkedVm {
                             let cmd = read_buf(CMD_BUF_PHYS, 128);
                             let out = read_buf(OUT_BUF_PHYS, 128);
                             let ready = read_buf(OUT_BUF_PHYS + READY_SIGNAL_OFFSET, 6);
-                            tracing::info!("FORK RUN: tick={} rip=0x{:x} io_count={} cmd=[{}] out=[{}] ready=[{}] elapsed={:?}",
-                                tick_count, r.rip, io_count, cmd, out, ready, start.elapsed());
+                            let serial_out = String::from_utf8_lossy(uart.output());
+                            tracing::info!("FORK RUN: tick={} rip=0x{:x} rflags=0x{:x} io_count={} cmd=[{}] out=[{}] ready=[{}] serial=[{:?}] elapsed={:?}",
+                                tick_count, r.rip, r.rflags, io_count, cmd, out, ready, serial_out, start.elapsed());
                         }
                     }
                     if self.check_ready() {
@@ -306,7 +354,6 @@ impl ForkedVm {
                 continue;
             }
 
-            // SAFETY: kvm_run_ptr is a valid mmap'd kvm_run.
             let reason = unsafe { Vcpu::exit_reason(self.kvm_run_ptr) };
             match reason {
                 kvm::KVM_EXIT_IO => {
@@ -318,6 +365,26 @@ impl ForkedVm {
                     if io_count.is_multiple_of(500) {
                         let dir_str = if direction == 0 { "IN" } else { "OUT" };
                         tracing::debug!("IO#{:06} {} port=0x{:x} size={}", io_count, dir_str, port, size);
+                    }
+                    // After each IO exit, try virtio RX polling (deliver pending packets)
+                    if let Some(net) = self.virtio_net.as_ref() {
+                        let mut net = net.borrow_mut();
+                        let was_read = net.isr;
+                        net.try_rx();
+                        if net.isr != was_read {
+                            if self.enable_irqchip {
+                                vcpu.inject_lapic_irq(0x3b);
+                            } else {
+                                let _ = vcpu.signal_lapic_irq(0x3b);
+                            }
+                        }
+                    }
+                    // Periodic serial output dump
+                    if io_count % 2000 == 0 && io_count > 0 {
+                        let serial_out = String::from_utf8_lossy(uart.output());
+                        if !serial_out.is_empty() {
+                            tracing::info!("[serial @ io_count={}] {:?}", io_count, serial_out);
+                        }
                     }
                     if direction == 0 {
                         // IN: guest reads from port — provide default values
@@ -386,6 +453,58 @@ impl ForkedVm {
                     }
                     continue;
                 }
+                kvm::KVM_EXIT_MMIO => {
+                    let phys_addr = unsafe {
+                        std::ptr::read(self.kvm_run_ptr.add(32) as *const u64)
+                    };
+                    let mmio_len = unsafe {
+                        std::ptr::read(self.kvm_run_ptr.add(48) as *const u32)
+                    };
+                    let is_write = unsafe {
+                        std::ptr::read(self.kvm_run_ptr.add(52) as *const u8)
+                    } != 0;
+
+                    use crate::arch::layout::{VIRTIO_MMIO_ADDR, VIRTIO_MMIO_SIZE};
+                    if phys_addr >= VIRTIO_MMIO_ADDR && phys_addr < VIRTIO_MMIO_ADDR + VIRTIO_MMIO_SIZE {
+                        if let Some(ref net_cell) = self.virtio_net {
+                            let offset = (phys_addr - VIRTIO_MMIO_ADDR) as u32;
+                            let mut net = net_cell.borrow_mut();
+                            if !is_write {
+                                let val = net.mmio_read(offset);
+                                let data_ptr = self.kvm_run_ptr.add(40);
+                                for i in 0..mmio_len.min(4) as usize {
+                                    unsafe { std::ptr::write(data_ptr.add(i), ((val >> (i * 8)) & 0xFF) as u8) };
+                                }
+                            } else {
+                                let mut val = 0u32;
+                                let data_ptr = self.kvm_run_ptr.add(40);
+                                for i in 0..mmio_len.min(4) as usize {
+                                    val |= (unsafe { std::ptr::read(data_ptr.add(i)) } as u32) << (i * 8);
+                                }
+                                net.mmio_write(offset, val);
+                                // After each MMIO write (kick), deliver pending RX packets
+                                let was_read = net.isr;
+                                net.try_rx();
+                                if net.isr != was_read {
+                                    if self.enable_irqchip {
+                                        vcpu.inject_lapic_irq(0x3b);
+                                    } else {
+                                        let _ = vcpu.signal_lapic_irq(0x3b);
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    // Unhandled MMIO — ignore (return 0xFF for reads)
+                    if !is_write {
+                        let data_ptr = self.kvm_run_ptr.add(40);
+                        for i in 0..mmio_len.min(8) as usize {
+                            unsafe { std::ptr::write(data_ptr.add(i), 0xFFu8) };
+                        }
+                    }
+                    continue;
+                }
                 kvm::KVM_EXIT_SHUTDOWN => {
                     unsafe { Self::disarm_timer(); }
                     tracing::info!("KVM_EXIT_SHUTDOWN — guest completed (poweroff or triple-fault)");
@@ -393,6 +512,13 @@ impl ForkedVm {
                 }
                 kvm::KVM_EXIT_FAIL_ENTRY => {
                     unsafe { Self::disarm_timer(); }
+                    let hw_fail = unsafe {
+                        std::ptr::read(self.kvm_run_ptr.add(32) as *const u64)
+                    };
+                    tracing::error!(
+                        "KVM_EXIT_FAIL_ENTRY: hardware_entry_failure_reason=0x{:x}",
+                        hw_fail,
+                    );
                     return Err(ForkError::GuestExit {
                         reason: kvm::KVM_EXIT_FAIL_ENTRY,
                     });
@@ -557,6 +683,10 @@ pub struct ForkEngine {
     /// Shared memory regions to inject into every forked VM (EPT zero-copy).
     /// Each entry is (region, guest_phys_addr).
     shared_regions: Vec<(SharedMemoryRegion, u64)>,
+    /// Optional TAP file descriptor for real network access.
+    /// When set, virtio-net will be able to send/receive packets to the host network.
+    /// Must be set before calling `fork()`.
+    tap_fd: Option<i32>,
 }
 
 impl ForkEngine {
@@ -583,6 +713,7 @@ impl ForkEngine {
             enable_irqchip: false,
             cpuid_cache,
             shared_regions: Vec::new(),
+            tap_fd: None,
         }
     }
 
@@ -594,6 +725,16 @@ impl ForkEngine {
     /// Slot numbers start at 1 (slot 0 is always the primary snapshot memory).
     pub fn add_shared_region(&mut self, region: SharedMemoryRegion, guest_phys: u64) {
         self.shared_regions.push((region, guest_phys));
+    }
+
+    /// Set a TAP file descriptor for real network access.
+    /// The fd is duplicated immediately (before seccomp is installed).
+    pub fn set_tap_fd(&mut self, fd: i32) {
+        unsafe { libc::write(2, b"SET_TAP_FD_ENTER\n" as *const u8 as *const libc::c_void, 18); }
+        let dup_fd = unsafe { libc::dup(fd) };
+        unsafe { libc::write(2, b"SET_TAP_FD_DUP_DONE\n" as *const u8 as *const libc::c_void, 21); }
+        self.tap_fd = Some(if dup_fd < 0 { fd } else { dup_fd });
+        unsafe { libc::write(2, b"SET_TAP_FD_EXIT\n" as *const u8 as *const libc::c_void, 17); }
     }
 
     /// List registered shared memory regions (region, guest_phys).
@@ -739,6 +880,12 @@ impl ForkEngine {
         if self.enable_irqchip {
             vm.create_irqchip()?;
             vm.create_pit()?;
+            // Configure the PIT for 100Hz periodic timer interrupts. Without
+            // this, the fresh PIT from KVM_CREATE_PIT2 has default state (no
+            // periodic output) and the guest kernel's scheduler never ticks.
+            if let Err(e) = crate::arch::vm::set_pit2(vm.as_raw_fd()) {
+                tracing::warn!("set_pit2 failed: {e} (timer interrupts may not work)");
+            }
 
             // Restore irqchip state (PIC master, PIC slave, IOAPIC) from snapshot.
             // A fresh KVM_CREATE_IRQCHIP initializes the PIC with all interrupts
@@ -761,6 +908,99 @@ impl ForkEngine {
                 restore_one(crate::kvm::KVM_IRQCHIP_PIC_MASTER, &chips.master_pic);
                 restore_one(crate::kvm::KVM_IRQCHIP_PIC_SLAVE, &chips.slave_pic);
                 restore_one(crate::kvm::KVM_IRQCHIP_IOAPIC, &chips.ioapic);
+
+                // The guest booted with acpi=off, so it uses the PIC (8259), not the
+                // IOAPIC.  KVM_IRQ_LINE asserts on both PIC and IOAPIC, but we need
+                // the IOAPIC path to work (it uses the non-destructive LAPIC IRR
+                // mechanism).  Mask IRQ 11 on the slave PIC (set IMR bit 3) to
+                // prevent the ExtInt INTA cycle from destroying PIC state.
+                // The IOAPIC entry (patched below) will deliver via LAPIC IRR.
+                {
+                    let master_back = unsafe { vm.get_irqchip(crate::kvm::KVM_IRQCHIP_PIC_MASTER) };
+                    if let Ok(pic) = master_back {
+                        let imr = pic.dummy[2];
+                        let irq_base = pic.dummy[5];
+                        let irq2 = (imr >> 2) & 1;
+                        tracing::info!(
+                            "PIC_MASTER: IMR=0x{imr:02x} (IRQ2={irq2}) irq_base=0x{irq_base:02x}"
+                        );
+                        tracing::info!("PIC_MASTER: full state: {:02x?}", &pic.dummy[..16]);
+                    }
+                }
+                {
+                    let slave_back = unsafe { vm.get_irqchip(crate::kvm::KVM_IRQCHIP_PIC_SLAVE) };
+                    if let Ok(mut pic) = slave_back {
+                        // kvm_pic_state layout: offset 0 = last_irr, 1 = irr,
+                        // 2 = imr (Interrupt Mask Register), 3 = isr
+                        let imr_offset = 2usize;
+                        let imr = pic.dummy[imr_offset];
+                        let irq_base = pic.dummy[5];
+                        let irq11 = (imr >> 3) & 1;
+                        tracing::info!("PIC_SLAVE: IMR=0x{imr:02x} (IRQ11={irq11}) irq_base=0x{irq_base:02x}");
+                        tracing::info!("PIC_SLAVE: full state: {:02x?}", &pic.dummy[..16]);
+                        // Unmask IRQ 11 = slave pin 3 (clear bit 3) — use PIC ExtINT path
+                        if (imr >> 3) & 1 == 1 {
+                            pic.dummy[imr_offset] = imr & !(1u8 << 3);
+                            unsafe {
+                                let raw = crate::kvm::KvmIrqChipRaw {
+                                    chip_id: crate::kvm::KVM_IRQCHIP_PIC_SLAVE,
+                                    dummy: pic.dummy,
+                                    ..Default::default()
+                                };
+                                let _ = vm.set_irqchip(&raw);
+                            }
+                            tracing::info!("PIC_SLAVE: unmasked IRQ 11 (slave pin 3)");
+                        }
+                    }
+                }
+
+                // After restoring the IOAPIC, patch the entry for IRQ 11 (virtio-net).
+                // The snapshot's IOAPIC has ALL entries masked (mask=1, vector=0)
+                // The snapshot's IOAPIC has ALL entries masked because the guest
+                // kernel booted with acpi=off and never configured the IOAPIC.
+                // Set IOAPIC entry 11 to vector 0x3B = slave PIC base 0x38 + pin 3.
+                // Use LEVEL-triggered (bit 15 = 0x8000) so kvm_ioapic_send_eoi()
+                // propagates the PIC EOI to the LAPIC and clears its ISR bit.
+                // KVM_IRQ_LINE asserts both PIC and IOAPIC; the IOAPIC delivers
+                // via LAPIC IRR while the PIC delivers via ExtINT LINT0.
+                // Destination BSP (0).
+                if let Some(ioapic_data) = &chips.ioapic {
+                    let mut ioapic = [0u8; 512];
+                    ioapic.copy_from_slice(ioapic_data.as_ref());
+                    // kvm_ioapic_state layout: 8 base + 4 ioregsel + 4 id + 4 irr + 4 pad
+                    // then 24 redirection entries of 8 bytes each at offset 24
+                    let ioredirtbl_base = 24usize;
+                    let entry_off = ioredirtbl_base + 11 * 8;
+                    let low: u32 = 0x803B; // vector 0x3B, unmasked, level-triggered, Fixed
+                    let high: u32 = 0;     // dest=0 (BSP)
+                    ioapic[entry_off..entry_off + 4].copy_from_slice(&low.to_le_bytes());
+                    ioapic[entry_off + 4..entry_off + 8].copy_from_slice(&high.to_le_bytes());
+                    let raw = crate::kvm::KvmIrqChipRaw {
+                        chip_id: crate::kvm::KVM_IRQCHIP_IOAPIC,
+                        dummy: ioapic,
+                        ..Default::default()
+                    };
+                    unsafe {
+                        if let Err(e) = vm.set_irqchip(&raw) {
+                            tracing::warn!("Failed to set IOAPIC IRQ 11 entry: {e}");
+                        } else {
+                            tracing::info!("IOAPIC: IRQ 11 entry set to vector=0x3B, level-triggered, unmasked");
+                            // Verify by reading back
+                            if let Ok(back) = vm.get_irqchip(crate::kvm::KVM_IRQCHIP_IOAPIC) {
+                                let back_lo = u32::from_le_bytes(
+                                    back.dummy[entry_off..entry_off+4].try_into().unwrap()
+                                );
+                                let back_vec = back_lo & 0xff;
+                                let back_mask = (back_lo >> 16) & 1;
+                                let back_trig = (back_lo >> 15) & 1;
+                                tracing::info!(
+                                    "IOAPIC: readback entry 11: vector={}, mask={}, level={}",
+                                    back_vec, back_mask, back_trig
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -839,6 +1079,16 @@ impl ForkEngine {
         // Save register restore timing info
         let _reg_setup_ticks = after_restore.saturating_sub(after_mmap_run);
 
+        // 8. Enable the LAPIC if irqchip is present. KVM_CREATE_IRQCHIP leaves
+        //    the LAPIC software-disabled (SVR bit 8 = 0), which blocks all
+        //    interrupt delivery including IOAPIC-routed MSIs. We also configure
+        //    LVT LINT0 for ExtINTA mode so PIC-originated timer interrupts work.
+        if self.enable_irqchip {
+            if let Err(e) = vcpu.enable_apic() {
+                tracing::warn!("enable_apic failed: {e} (interrupts may not work)");
+            }
+        }
+
         let cow_str = if self.snapshot.mem_fd.is_some() { "CoW" } else { "memcpy" };
         trace!(
             "fork: {cow_str} mmap={}μs restore={}μs total={}μs",
@@ -849,12 +1099,17 @@ impl ForkEngine {
 
         // Log the restored RIP for diagnostics
         if let Ok(r) = vcpu.get_regs() {
-            tracing::debug!("fork restored: rip=0x{:x} rsp=0x{:x}", r.rip, r.rsp);
+            tracing::debug!("fork restored: rip=0x{:x} rsp=0x{:x} rflags=0x{:x} (if={})", r.rip, r.rsp, r.rflags, (r.rflags >> 9) & 1);
         }
 
         // Everything succeeded — disarm the mmap guard and construct ForkedVm
         let (memory_ptr, memory_size_usize) = mem_guard.disarm();
         let memory_size = memory_size_usize as u64;
+
+        let tap_fd = self.tap_fd;
+        let virtio_net = self.snapshot.virtio_net_state.as_ref().map(|state| {
+            RefCell::new(VirtioNetPci::from_state(state, memory_ptr, tap_fd))
+        });
 
         Ok(ForkedVm {
             vm,
@@ -865,7 +1120,9 @@ impl ForkEngine {
             memory_ptr,
             memory_size,
             post_boot: self.enable_irqchip,
+            enable_irqchip: self.enable_irqchip,
             entropy_divergence: true,  // default: inject CSPRNG per fork
+            virtio_net,
         })
     }
 
@@ -937,6 +1194,14 @@ impl KvmForkBackend {
         Self::default()
     }
 
+    /// Set a TAP file descriptor on the fork engine for real network access.
+    /// Must be called after `init` and before `exec`.
+    pub fn set_tap_fd(&mut self, fd: i32) {
+        if let Some(ref mut engine) = self.engine {
+            engine.set_tap_fd(fd);
+        }
+    }
+
     /// Get the execution tier for this backend.
     pub const fn tier() -> ExecutionTier {
         ExecutionTier::KvmFork
@@ -972,17 +1237,22 @@ impl SandboxBackend for KvmForkBackend {
         };
 
         let mut engine = ForkEngine::new(kvm, snapshot, vcpu_mmap_size);
-        // No in-kernel irqchip — we avoid KVM_CREATE_IRQCHIP because it adds
-        // ~1ms per fork from PIT + PIC + IOAPIC + LAPIC creation. Instead,
-        // we use KVM_INTERRUPT (KVM_INTERRUPT) to inject a raw interrupt
-        // vector 0x20 (timer IRQ) on KVM_EXIT_HLT, which wakes the guest.
-        // The 500µs SIGALRM timer handles periodic READY checks.
-        engine.enable_irqchip = false;
+        // Enable in-kernel irqchip when the snapshot has virtio state, since
+        // the guest kernel's interrupt subsystem was initialized with an IOAPIC
+        // and expects it for IRQ routing. Without the irqchip, KVM_INTERRUPT
+        // cannot deliver device interrupts to the kernel's virtio handler.
+        if engine.snapshot.virtio_net_state.is_some() {
+            engine.enable_irqchip = true;
+            tracing::info!("ENABLE_IRQCHIP: snapshot has virtio_net_state, irqchip enabled");
+        } else {
+            tracing::info!("ENABLE_IRQCHIP: snapshot NO virtio_net_state, irqchip disabled");
+        }
         self.engine = Some(engine);
         Ok(())
     }
 
     fn exec(&mut self, code: &str) -> tinymachine_api::Result<String> {
+        unsafe { libc::write(2, b"KVM_EXEC_ENTER\n" as *const u8 as *const libc::c_void, 16); }
         let engine = self.engine.as_ref().ok_or_else(|| {
             tinymachine_api::ApiError::sandbox("KVM fork backend not initialised")
         })?;

@@ -3,8 +3,9 @@
 //! Tests three GPU backends inside a KVM VM with VFIO passthrough:
 //!
 //!   **Phase 1 — PCIIface** (direct PCI BAR mmap, no kernel driver):
-//!     Expected to FAIL on AD104 because the SEC2 Falcon is power-gated.
-//!     The failure is documented with exact error messages.
+//!     FAILS on AD104: GSP booter asserts mailbox[0]==0 (got 0x89)
+//!     because SEC2 (BAR0+0x840000) is power-gated after VFIO FLR.
+//!     PCIIface BAR0 mmap itself works (verified: 0x194000a1 at offset 0).
 //!
 //!   **Phase 1b — Diagnostic Register Probe** (sysfs PCI resource files):
 //!     Probes GPU register state from inside the VM to determine which
@@ -45,7 +46,7 @@ fn kernel_path_for(profile: &str) -> PathBuf {
 }
 
 fn kernel_path() -> PathBuf {
-    kernel_path_for("gpu-nvidia")
+    kernel_path_for("gpu-vfio")
 }
 
 fn tinygrad_nv_initrd() -> PathBuf {
@@ -86,14 +87,9 @@ fn has_vfio_gpu() -> bool {
 const PCIIFACE_TEST_CODE: &str = r#"
 import sys, os
 
-# Find where tinygrad is installed
-for p in ['/usr/lib/python3.12/dist-packages', '/usr/lib/python3.12/site-packages',
-           '/usr/local/lib/python3.12/dist-packages', '/usr/lib/python3/dist-packages']:
-    if os.path.isdir(p):
-        sys.path.insert(0, p)
-
+sys.path.insert(0, '/usr/lib/python3.12/dist-packages')
 os.environ['NV_DEBUG'] = '0'
-os.environ['NV_INTERFACE'] = 'PCIIface'  # force PCIIface specifically
+os.environ['NV_INTERFACE'] = 'PCIIface'
 
 print('PCIIFACE: Starting tinygrad NV device detection via PCIIface...', flush=True)
 try:
@@ -112,8 +108,14 @@ print('PCIIFACE_DONE', flush=True)
 
 /// Test that PCIIface FAILS on AD104 with proper evidence.
 ///
-/// This is NOT an ignored test — it verifies the expected failure mode.
-/// The test passes when the failure is logged correctly.
+/// Root cause: the SEC2 Falcon engine (at BAR0+0x840000) is power-gated
+/// after VFIO FLR on Ada GPUs. SEC2 registers read as 0xbadf5xxx (poison).
+/// The GSP booter loader cannot execute, returning mailbox=0x89.
+///
+/// PCIIface BAR0 mmap WORKS (confirmed: mmap returns 0x194000a1 for
+/// PMC_BOOT_0).  The failure is purely Falcon power-gating, not EPT/MMIO.
+///
+/// This test verifies the expected failure mode and logs the evidence.
 #[test]
 fn test_tinygrad_nv_pciiface_failure() {
     // ── Prerequisites ──
@@ -195,23 +197,26 @@ fn test_tinygrad_nv_pciiface_failure() {
 // ─── Phase 1b: PCIIface diagnostic register probe ─────────────────
 
 /// Diagnostic register probe — runs inside the VM and reads GPU register
-/// state via sysfs PCI resource files to determine which Falcon engines
-/// are accessible after VFIO FLR + VBIOS POST.
+/// state via mmap'd PCI BAR0 to determine which Falcon engines are
+/// accessible after VFIO FLR + VBIOS POST.
+///
+/// Uses mmap (not pread) because guest kernel's `pci_read_resource()`
+/// returns EIO for pread on sysfs resource files (kernel 6.8.1 quirk).
 const DIAG_REGISTER_PROBE: &str = r#"
-import os,sys,glob,struct
+import os,sys,glob,struct,mmap
 ok,ps=0,0
-def _pb(fd,o,nm):
+def _pb(m,o,nm):
     global ok,ps
     try:
-        d=os.pread(fd,4,o);v=struct.unpack('<I',d)[0]
+        v=struct.unpack('<I',m[o:o+4])[0]
         if v==0xffffffff or v==0xffffff88 or(v&0xbadf0000)==0xbadf0000:
             ps+=1;print(f'  [POISON] 0x{o:06x}=0x{v:08x}#{nm}',flush=1)
         else:
             ok+=1;print(f'  [OK] 0x{o:06x}=0x{v:08x}#{nm}',flush=1)
-    except OSError as e:
+    except Exception as e:
         ps+=1;print(f'  [ERR] 0x{o:06x}:{e}#{nm}',flush=1)
-def probe_list(fd,base,tbl):
-    for n,o in tbl: _pb(fd,base+o,n)
+def probe_list(m,base,tbl):
+    for n,o in tbl: _pb(m,base+o,n)
 
 gpu=None
 for p in ['/sys/bus/pci/devices/0000:01:00.0']:
@@ -237,6 +242,26 @@ if not os.path.exists(r0):
     print('DIAG:NO BAR0 access');print('DIAG_DONE');sys.exit(0)
 fd=os.open(r0,os.O_RDWR)
 
+# DIAG: mmap-based register probe (pread is broken, mmap works)
+import mmap
+bar0_v=struct.unpack('<I',d[0x10:0x14])[0]
+bar0_addr=bar0_v&0xfffffff0
+print(f'DIAG:bar0_addr=0x{bar0_addr:08x}',flush=1)
+m=mmap.mmap(fd,0x1000000,mmap.MAP_SHARED,mmap.PROT_READ|mmap.PROT_WRITE)
+def rr(o): return struct.unpack('<I',m[o:o+4])[0]
+print(f'DIAG:PMC_BOOT_0=0x{rr(0):08x}',flush=1)
+print(f'DIAG:PMC_ENABLE=0x{rr(0x200):08x}',flush=1)
+print(f'DIAG:GFW_STATUS=0x{rr(0x118234):08x}',flush=1)
+print(f'DIAG:SEC2_CPUCTL=0x{rr(0x840100):08x}',flush=1)
+print(f'DIAG:SEC2_DMACTL=0x{rr(0x84010c):08x}',flush=1)
+print(f'DIAG:GSP_CPUCTL=0x{rr(0x110100):08x}',flush=1)
+print(f'DIAG:GSP_DMACTL=0x{rr(0x11010c):08x}',flush=1)
+# WPR2 check
+print(f'DIAG:WPR2_HI=0x{rr(0x100c4c):08x}',flush=1)
+print(f'DIAG:WPR2_LO=0x{rr(0x100c48):08x}',flush=1)
+# FBIF status
+for i in range(4): print(f'DIAG:FBIF{i}=0x{rr(0x110600+i*4):08x}',flush=1)
+
 # GPTable: (name, offset)
 IDX=[('PMC_BOOT_0',0x0),('PMC_ENABLE',0x200),('PMC_PG_CTRL',0x20c)]
 GFX=[('MAILBOX0',0x40),('MAILBOX1',0x44),('FALCON_OS',0x80),('FALCON_RM',0x84),
@@ -245,18 +270,18 @@ GFX=[('MAILBOX0',0x40),('MAILBOX1',0x44),('FALCON_OS',0x80),('FALCON_RM',0x84),
      ('DMATRFFBOFFS',0x11c),('DMATRFBASE1',0x128)]
 GSP_EXT=[('CPUCTL_ALIAS',0x130),('IMEMC',0x180),('IMEMD',0x184),('DMEMC',0x1c0),('DMEMD',0x1c4)]
 
-print('=== A: IDENTITY ===');probe_list(fd,0,IDX)
-print('=== B: GFX FALCON @110000 ===');probe_list(fd,0x110000,GFX)
-print('=== C: GSP @118000 ===');probe_list(fd,0x118000,GFX);probe_list(fd,0x118000,GSP_EXT)
-print('=== D: SEC2 @840000 ===');probe_list(fd,0x840000,[(n,o) for n,o in GFX[:9]])
+print('=== A: IDENTITY ===');probe_list(m,0,IDX)
+print('=== B: GFX FALCON @110000 ===');probe_list(m,0x110000,GFX)
+print('=== C: GSP @118000 ===');probe_list(m,0x118000,GFX);probe_list(m,0x118000,GSP_EXT)
+print('=== D: SEC2 @840000 ===');probe_list(m,0x840000,[(n,o) for n,o in GFX[:9]])
 print('=== E: ENGINE/SCRATCH ===')
 for n,o in [('GSP_ENG',0x1103c0),('SEC2_ENG',0x8403c0),('GFW_MASK',0x118128),
-            ('BSI_14',0x1180f8),('GFW_42',0x1183a4)]: _pb(fd,o,n)
-for i in range(6): _pb(fd,0x118234+i*4,f'GFW_{i}')
+            ('BSI_14',0x1180f8),('GFW_42',0x1183a4)]: _pb(m,o,n)
+for i in range(6): _pb(m,0x118234+i*4,f'GFW_{i}')
 print('=== F: RISCV @111000 ===')
 for n,o in [('CPUCTL',0x1388),('BCR_CTRL',0x1668),('MOD_SEL',0x1180),
-            ('BROM_UCODE',0x1198),('BROM_ENGID',0x119c)]: _pb(fd,0x111000+o,n)
-for i in range(4): _pb(fd,0x110600+i*4,f'FBIF{i}')
+            ('BROM_UCODE',0x1198),('BROM_ENGID',0x119c)]: _pb(m,0x111000+o,n)
+for i in range(4): _pb(m,0x110600+i*4,f'FBIF{i}')
 print(f'=== SUMMARY: OK={ok} POISON={ps} ===');print('DIAG_DONE')
 "#;
 

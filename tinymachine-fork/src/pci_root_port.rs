@@ -119,32 +119,40 @@ impl PcieRootPort {
         // 0x1B: Secondary Latency Timer
         c[0x1b] = 0x00;
 
-        // 0x1C: I/O Base (0xF0 = disabled)
-        c[0x1c] = 0xf0;
-        // 0x1D: I/O Limit (0x00 = disabled)
-        c[0x1d] = 0x00;
+        // 0x1C: I/O Base — enable I/O forwarding for entire 16-bit I/O space.
+        // Without this, the kernel detects a mismatch (GPU has I/O BARs but
+        // bridge window disabled) and triggers full PCI resource reassignment,
+        // overwriting our pre-assigned BAR addresses.
+        // bit 3:0 = 0x0 (16-bit decode), bit 7:4 = 0x0 (I/O base = 0x0000)
+        c[0x1c] = 0x00;
+        // 0x1D: I/O Limit — cover ports 0x0000-0xFFFF
+        // bit 3:0 = 0x0, bit 7:4 = 0xF (I/O limit = 0xF000, +0xFFF = 0xFFFF)
+        c[0x1d] = 0xF0;
         // 0x1E-0x1F: Secondary Status
         c[0x1e] = 0x00;
         c[0x1f] = 0x00;
 
-        // 0x20-0x21: Memory Base (forward all non-prefetchable: base=0x0000)
-        c[0x20] = 0x00;
+        // 0x20-0x21: Memory Base — non-prefetchable window [0xE0000000, 0xF0000000)
+        // Upper 8 bits of 20-bit address: base address = 0xE0 << 20 = 0xE0000000
+        c[0x20] = 0xE0;
         c[0x21] = 0x00;
-        // 0x22-0x23: Memory Limit (forward all: limit=0xFFFF)
-        c[0x22] = 0xff;
-        c[0x23] = 0xff;
+        // 0x22-0x23: Memory Limit — limit = (0xF0 << 20) | 0xFFFFF = 0xF0FFFFFF
+        c[0x22] = 0xF0;
+        c[0x23] = 0x00;
 
-        // 0x24-0x25: Prefetchable Memory Base 32-bit (disabled = 0x0001)
+        // 0x24-0x27: Prefetchable Memory 32-bit (disabled — use 64-bit below)
         c[0x24] = 0x01;
         c[0x25] = 0x00;
-        // 0x26-0x27: Prefetchable Memory Limit 32-bit (disabled = 0x0000)
         c[0x26] = 0x00;
         c[0x27] = 0x00;
 
-        // 0x28-0x2B: Prefetchable Base Upper 32 (0)
-        // Already zero
-        // 0x2C-0x2F: Prefetchable Limit Upper 32 (at 4GB = 0x00000001)
-        c[0x2c] = 0x01;
+        // 0x28-0x2B: Prefetchable Base Upper 32-bit: 0x1000000000 = 0x00000010
+        c[0x28] = 0x10;
+        c[0x29] = 0x00;
+        c[0x2a] = 0x00;
+        c[0x2b] = 0x00;
+        // 0x2C-0x2F: Prefetchable Limit Upper 32-bit: 0x2000000000 = 0x00000020
+        c[0x2c] = 0x20;
         c[0x2d] = 0x00;
         c[0x2e] = 0x00;
         c[0x2f] = 0x00;

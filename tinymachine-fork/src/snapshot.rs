@@ -14,6 +14,26 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
+/// Serializable state of a VirtioNetPci device for snapshot save/restore.
+///
+/// This is saved after the guest kernel has fully initialized the device
+/// (written queue PFNs, negotiated features, set DRIVER_OK). On fork,
+/// a new TAP fd is connected and the device resumes operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VirtioNetState {
+    pub selected_queue: u32,
+    pub queue_pfns: [u64; 2],
+    pub queue_sizes: [u16; 2],
+    pub guest_features: u32,
+    pub device_features: u32,
+    pub status: u8,
+    pub isr: u8,
+    pub irq_line: u8,
+    pub bar0_shadow: u32,
+    pub next_rx_idx: u16,
+    pub intr_pending: bool,
+}
+
 use crate::arch::{RESERVED_MMIO_REGIONS, XSAVE_SIZE};
 pub use crate::arch::target::snapshot_types::{
     CpuState, DescTable, IrqChipState, KvmRegs, KvmSregs, Segment, XsaveBuffer,
@@ -125,6 +145,9 @@ pub struct Snapshot {
     /// to get kernel-level CoW instead of copying `memory` Vec<u8>.
     /// This reduces fork latency from O(RAM) to O(page_table).
     pub mem_fd: Option<File>,
+    /// Optional virtio-net device state saved after guest initialization.
+    /// Restored on fork so Tier 2 (ForkedVm) inherits guest networking.
+    pub virtio_net_state: Option<VirtioNetState>,
     /// Kernel version used to build this snapshot (for integrity verification)
     pub kernel_version: String,
     /// SHA-256 hash of the kernel binary at snapshot creation time
@@ -144,6 +167,7 @@ impl Clone for Snapshot {
             mem_fd: None, // File is not Clone — reopened on load
             kernel_version: self.kernel_version.clone(),
             kernel_hash: self.kernel_hash.clone(),
+            virtio_net_state: self.virtio_net_state.clone(),
         }
     }
 }
@@ -252,6 +276,15 @@ impl Snapshot {
                 .open(dir.join("xsave.bin"))?;
             xsave_file.write_all(xsave)?;
             xsave_file.sync_all()?;
+        }
+
+        // Write virtio_net.json (optional — only present when snapshot has networking)
+        if let Some(ref vn) = self.virtio_net_state {
+            let mut vn_file = std::fs::OpenOptions::new()
+                .write(true).create(true).truncate(true).mode(0o600)
+                .open(dir.join("virtio_net.json"))?;
+            vn_file.write_all(serde_json::to_string_pretty(vn)?.as_bytes())?;
+            vn_file.sync_all()?;
         }
 
         // Write irqchip0.bin, irqchip1.bin, irqchip2.bin (optional)
@@ -451,6 +484,15 @@ impl Snapshot {
         // Try to load irqchip files (optional — legacy snapshots may not have them)
         let irqchips = load_irqchips(dir)?;
 
+        // Try to load virtio_net.json (optional — legacy snapshots may not have it)
+        let virtio_net_path = dir.join("virtio_net.json");
+        let virtio_net_state = if virtio_net_path.exists() {
+            let data = std::fs::read_to_string(&virtio_net_path)?;
+            serde_json::from_str(&data).ok()
+        } else {
+            None
+        };
+
         Ok(Self {
             memory: Vec::new(),    // lazy — don't read 512MB into RAM
             memory_size,
@@ -461,6 +503,7 @@ impl Snapshot {
             mem_fd: Some(mem_file),
             kernel_version: meta.kernel_version,
             kernel_hash: meta.kernel_hash,
+            virtio_net_state,
         })
     }
 

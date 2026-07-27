@@ -131,31 +131,6 @@ pub fn read_bar_u32(dev_fd: std::os::fd::RawFd, bar_index: u32, register_offset:
     Some(u32::from_le_bytes(buf))
 }
 
-/// Read a PCI BAR address from the sysfs resource file.
-#[allow(dead_code)]
-pub(crate) fn read_bar_resource_addr(bdf: &str, bar_index: u32) -> Option<(u64, u64)> {
-    let resource_path = std::path::Path::new("/sys/bus/pci/devices")
-        .join(bdf)
-        .join("resource");
-    let content = std::fs::read_to_string(&resource_path).ok()?;
-    for (i, line) in content.lines().enumerate() {
-        if i as u32 != bar_index {
-            continue;
-        }
-        let parts: Vec<&str> = line.trim().split_whitespace().collect();
-        if parts.len() < 2 {
-            return None;
-        }
-        let start = u64::from_str_radix(parts[0].trim_start_matches("0x"), 16).ok()?;
-        let end = u64::from_str_radix(parts[1].trim_start_matches("0x"), 16).ok()?;
-        if start == 0 || end <= start {
-            return None;
-        }
-        let size = end - start + 1;
-        return Some((start, size));
-    }
-    None
-}
 
 /// Parse the MSI capability registers at `cap_offset` in PCI config space.
 pub(crate) fn parse_msi_at(dev_fd: std::os::fd::RawFd, config_off: u64, cap_offset: u16) -> Option<crate::vfio::device::MsiConfig> {

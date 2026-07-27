@@ -13,6 +13,7 @@ pub mod arch;
 pub mod kvm;
 pub mod snapshot;
 pub mod serial;
+pub mod net;
 pub mod fork;
 #[cfg(feature = "wasm")]
 pub mod wasm;

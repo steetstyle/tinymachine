@@ -103,7 +103,7 @@ fi
 
 if [ -x "$BUSYBOX_BIN" ] && [ -s "$BUSYBOX_BIN" ]; then
     cp "$BUSYBOX_BIN" "$TEMP_ROOT/bin/busybox"
-    for applet in sh mount umount cat echo dd printf poweroff tr; do
+    for applet in sh mount umount cat echo dd printf poweroff tr ifconfig route; do
         ln -sf busybox "$TEMP_ROOT/bin/$applet"
     done
 else
@@ -550,6 +550,12 @@ GCC_LIB="/lib/x86_64-linux-gnu/libgcc_s.so.1"
 if [ -f "$GCC_LIB" ]; then
     mkdir -p "$TEMP_ROOT/lib"
     cp -L "$GCC_LIB" "$TEMP_ROOT/lib/libgcc_s.so.1" 2>/dev/null && echo "Added libgcc_s.so.1 ($(du -sh "$TEMP_ROOT/lib/libgcc_s.so.1" | cut -f1))"
+fi
+
+# libffi.so.8 needed by MicroPython (dynamically linked for ctypes module)
+FFI_LIB="/lib/x86_64-linux-gnu/libffi.so.8"
+if [ -f "$FFI_LIB" ]; then
+    cp -L "$FFI_LIB" "$TEMP_ROOT/lib/libffi.so.8" 2>/dev/null && echo "Added libffi.so.8 ($(du -sh "$TEMP_ROOT/lib/libffi.so.8" | cut -f1))"
 fi
 
 # ── Step 6: NVIDIA kernel modules + firmware (GPU variants) ──

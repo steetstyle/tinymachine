@@ -126,13 +126,6 @@ impl ExecStrategy {
         ExecStrategy::PersistentWorker
     }
 
-    #[allow(dead_code)]
-    fn pool_size(&self) -> usize {
-        match self {
-            ExecStrategy::PersistentWorker => 1,
-            ExecStrategy::PreforkPool => 4, // Future: configurable pool size
-        }
-    }
 }
 
 /// Build the worker script based on the selected strategy.

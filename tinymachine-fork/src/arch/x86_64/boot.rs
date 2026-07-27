@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::net::virtio_net_pci::VirtioNetPci;
 use crate::pci_root_port::PcieRootPort;
 use thiserror::Error;
 use tracing::{info, trace, warn};
@@ -604,6 +605,10 @@ pub struct BootedVm {
     pub kernel_version: String,
     /// SHA-256 hash of the kernel binary at boot time
     pub kernel_hash: String,
+    /// Optional virtio-net device (for network access in the guest).
+    /// Uses `RefCell` for interior mutability — accessed in the KVM_RUN loop
+    /// which takes `&self`.
+    pub virtio_net: Option<RefCell<Box<VirtioNetPci>>>,
 }
 
 /// Information about a VFIO-pci device attached to the VM.
@@ -866,7 +871,8 @@ impl BootedVm {
     /// KVM_CREATE_IRQCHIP does NOT create a PIIX3 — only i8259 PIC + i8254 PIT.
     fn pci_config_read(bus: u8, dev: u8, func: u8, reg: u32, port: u16, _size: usize,
                        vfio: Option<&VfioPciInfo>,
-                       root_port: Option<&RefCell<PcieRootPort>>) -> u32 {
+                       root_port: Option<&RefCell<PcieRootPort>>,
+                       virtio_net: Option<&RefCell<Box<VirtioNetPci>>>) -> u32 {
         let guest_devfn = (dev << 3) | func;
 
         // ── VFIO forwarding (bus matches vfio_pci.bus) ──
@@ -964,6 +970,49 @@ impl BootedVm {
                     }
                 }
             }
+            (2, 0) => {
+                // BDF 00:02.0: virtio-net-pci (legacy mode)
+                // Returns virtio-net PCI config space values
+                let bar0_val = virtio_net.as_ref().map_or(0xFEBF0000u32, |nc| nc.borrow().bar0_shadow);
+                match reg {
+                    0x00 => { // Vendor/Device ID
+                        let v = (0x1000u32) << 16 | 0x1af4;
+                        (v >> ((port & 3) * 8)) as u32
+                    }
+                    0x04 => { // Command + Status
+                        let v = 0x00100003u32; // I/O+Mem, no Master | Cap list
+                        (v >> ((port & 3) * 8)) as u32
+                    }
+                    0x08 => { // Revision + Class (0x020000 = Ethernet)
+                        let class = 0x020000u32;
+                        (class >> ((port & 3) * 8)) as u32
+                    }
+                    0x0C => { // Cache line + Latency + Header type + BIST
+                        let v = 0x00u32 << 16; // header type 0 (single function)
+                        (v >> ((port & 3) * 8)) as u32
+                    }
+                    0x10 => { // BAR0: MMIO, 32-bit, non-prefetchable
+                        (bar0_val >> ((port & 3) * 8)) as u32
+                    }
+                    0x14..=0x24 => 0, // BAR1-BAR5: none
+                    0x2C => { // Subsystem vendor + ID
+                        let v = (0x0001u32) << 16 | 0x1af4;
+                        (v >> ((port & 3) * 8)) as u32
+                    }
+                    0x30 => 0, // Expansion ROM
+                    0x34 => 0, // Capabilities pointer
+                    0x3C => { // Interrupt line + pin
+                        if let Some(ref net_cell) = virtio_net {
+                            let net = net_cell.borrow();
+                            let v = (1u32 << 8) | (net.irq_line as u32); // pin A, line
+                            (v >> ((port & 3) * 8)) as u32
+                        } else {
+                            0u32
+                        }
+                    }
+                    _ => 0,
+                }
+            }
             _ => 0xFFFFFFFF,
         }
     }
@@ -973,13 +1022,18 @@ impl BootedVm {
     /// logs and ignores writes to emulated PIIX3 devices.
     fn pci_config_write(bus: u8, dev: u8, func: u8, reg: u32, port: u16, size: usize, val: u32,
                         vfio: Option<&VfioPciInfo>,
-                        root_port: Option<&RefCell<PcieRootPort>>) {
+                        root_port: Option<&RefCell<PcieRootPort>>,
+                        virtio_net: Option<&RefCell<Box<VirtioNetPci>>>) {
         let guest_devfn = (dev << 3) | func;
 
         // ── VFIO forwarding (bus matches vfio_pci.bus) ──
         if let Some(vfio_dev) = vfio {
             if bus == vfio_dev.bus && guest_devfn == vfio_dev.devfn {
                 let offset = (reg + (port & 3) as u32) as u16;
+                if offset >= 0x10 && offset <= 0x28 {
+                    eprintln!("[BOOT-write] pci_config_write GPU BDF {:02x}:{:02x}.{} reg=0x{offset:02x} size={size} val=0x{val:08x}",
+                        bus, dev, func);
+                }
                 vfio_dev.config_write(offset, size, val);
                 return;
             }
@@ -995,6 +1049,20 @@ impl BootedVm {
                     let mut rp = rp_cell.borrow_mut();
                     let reg16 = (reg + (port & 3) as u32) as u16;
                     rp.config_write(reg16, size, val);
+                }
+            }
+            (2, 0) => {
+                // virtio-net PCI config write — shadow BAR writes for size probing.
+                // The kernel probes BAR size by writing 0xFFFFFFFF then reading back.
+                // Bits [31:12] are writable; bits [11:0] are read-only (BAR type + alignment).
+                // For a 4KB 32-bit MMIO non-prefetchable BAR, the read-only mask is 0xFFF.
+                if reg == 0x10 && size == 4 {
+                    if let Some(ref net_cell) = virtio_net {
+                        let mut net = net_cell.borrow_mut();
+                        let ro_bits = net.bar0_shadow & 0x00000FFF;
+                        net.bar0_shadow = (val & 0xFFFFF000) | ro_bits;
+                        tracing::debug!("virtio-net BAR0 dword write: val=0x{val:08x} shadow=0x{:08x}", net.bar0_shadow);
+                    }
                 }
             }
             _ => {
@@ -1239,6 +1307,22 @@ impl BootedVm {
                 continue;
             }
             let reason = unsafe { Vcpu::exit_reason(self.kvm_run_ptr) };
+
+            // ── Virtio-net RX polling (non-blocking TAP read) ──
+            // After each KVM_RUN exit, check for incoming packets on the
+            // TAP interface and inject an interrupt if data arrives.
+            if let Some(ref net_cell) = self.virtio_net {
+                let mut net = net_cell.borrow_mut();
+                if net.status >= 4 && net.queue_pfns[0] != 0 {
+                    net.try_rx();
+                    if net.isr != 0 {
+                        let line = net.irq_line as u32;
+                        let _ = self.vm.set_irq_line(line, true);
+                        net.intr_pending = true;
+                    }
+                }
+            }
+
             match reason {
                 KVM_EXIT_HLT => {
                     // Check READY — init writes READY via /dev/mem then HLTs
@@ -1275,6 +1359,8 @@ impl BootedVm {
                     let vfio_pci = self.vfio_pci.as_ref();
                     // PCIe Root Port reference (bus 0 dev 1 func 0 emulation)
                     let root_port = self.pcie_root_port.as_ref();
+                    // virtio-net device reference (bus 0 dev 2 func 0)
+                    let virtio_net: Option<&RefCell<Box<VirtioNetPci>>> = self.virtio_net.as_ref();
                     if direction == 0 {
                         // IN: guest reads from port
                         match port {
@@ -1283,7 +1369,7 @@ impl BootedVm {
                                 // The kernel writes 0x80000000 to verify conf1 mechanism works.
                                 write_data(size, pci_config_addr);
                             }
-                            0xCFC..=0xCFF => {
+                             0xCFC..=0xCFF => {
                                 // PCI config data ports: decode address from pci_config_addr
                                 let addr = pci_config_addr;
                                 let cfg_val = if addr & 0x80000000 != 0 {
@@ -1292,7 +1378,7 @@ impl BootedVm {
                                     let dev  = (addr >> 11) & 0x1F;
                                     let func = (addr >> 8)  & 0x07;
                                     let reg  = addr & 0xFC;  // dword-aligned register
-                                    Self::pci_config_read(bus as u8, dev as u8, func as u8, reg, port, size, vfio_pci, root_port)
+                                    Self::pci_config_read(bus as u8, dev as u8, func as u8, reg, port, size, vfio_pci, root_port, virtio_net)
                                 } else {
                                     0xFFFFFFFF
                                 };
@@ -1337,7 +1423,7 @@ impl BootedVm {
                                     let dev  = (addr >> 11) & 0x1F;
                                     let func = (addr >> 8)  & 0x07;
                                     let reg  = addr & 0xFC;
-                                    Self::pci_config_write(bus as u8, dev as u8, func as u8, reg, port, size, val, vfio_pci, root_port);
+                                    Self::pci_config_write(bus as u8, dev as u8, func as u8, reg, port, size, val, vfio_pci, root_port, virtio_net);
                                 }
                                 // else: enable bit not set, ignore
                             }
@@ -1384,9 +1470,48 @@ impl BootedVm {
                 }
                 6 => {
                     // KVM_EXIT_MMIO — guest accessed an unmapped MMIO region.
-                    // This happens when a built-in driver (e.g., nouveau) probes
-                    // GPU BARs before map_guest_bar_slots() is called.
-                    // We lazily map the BAR on first access and retry KVM_RUN.
+                    let phys_addr = unsafe {
+                        std::ptr::read(self.kvm_run_ptr.add(32) as *const u64)
+                    };
+                    let mmio_len = unsafe {
+                        std::ptr::read(self.kvm_run_ptr.add(48) as *const u32)
+                    };
+                    let is_write = unsafe {
+                        std::ptr::read(self.kvm_run_ptr.add(52) as *const u8)
+                    } != 0;
+
+                    // ── Try virtio-net MMIO BAR ──
+                    if let Some(ref net_cell) = self.virtio_net {
+                        use crate::arch::layout::{VIRTIO_MMIO_ADDR, VIRTIO_MMIO_SIZE};
+                        if phys_addr >= VIRTIO_MMIO_ADDR && phys_addr < VIRTIO_MMIO_ADDR + VIRTIO_MMIO_SIZE {
+                            let offset = (phys_addr - VIRTIO_MMIO_ADDR) as u32;
+                            let mut net = net_cell.borrow_mut();
+                            if !is_write {
+                                let val = net.mmio_read(offset);
+                                tracing::debug!("virtio-net MMIO: READ  offset=0x{offset:04x} len={mmio_len} val=0x{val:08x}");
+                                if offset == 0x13 {
+                                    net.intr_pending = false;
+                                }
+                                let data_ptr = self.kvm_run_ptr.add(40);
+                                for i in 0..mmio_len.min(4) as usize {
+                                    unsafe { std::ptr::write(data_ptr.add(i), ((val >> (i * 8)) & 0xFF) as u8) };
+                                }
+                            } else {
+                                let mut val = 0u32;
+                                let data_ptr = self.kvm_run_ptr.add(40);
+                                for i in 0..mmio_len.min(4) as usize {
+                                    val |= (unsafe { std::ptr::read(data_ptr.add(i)) } as u32) << (i * 8);
+                                }
+                                tracing::debug!("virtio-net MMIO: WRITE offset=0x{offset:04x} len={mmio_len} val=0x{val:08x}");
+                                net.mmio_write(offset, val);
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Legacy VFIO GPU MMIO handler — this happens when a built-in
+                    // driver (e.g., nouveau) probes GPU BARs before
+                    // map_guest_bar_slots() is called.
                     if let Some(ref mmio_info) = self.vfio_mmio_info {
                         let phys_addr = unsafe {
                             std::ptr::read(self.kvm_run_ptr.add(32) as *const u64)
@@ -1511,6 +1636,11 @@ impl BootedVm {
         let irqchips = unsafe { self.save_irqchip_state() };
 
         let mem_size = memory_vec.len() as u64;
+        // Save virtio-net device state if present
+        let virtio_net_state = self.virtio_net.as_ref().map(|cell| {
+            cell.borrow().capture_state()
+        });
+
         Ok(Snapshot {
             memory: memory_vec,
             memory_size: mem_size,
@@ -1521,6 +1651,7 @@ impl BootedVm {
             mem_fd: None,
             kernel_version: self.kernel_version.clone(),
             kernel_hash: self.kernel_hash.clone(),
+            virtio_net_state,
         })
     }
 
@@ -3319,6 +3450,7 @@ pub unsafe fn boot_linux(kvm: &Kvm, config: &BootConfig) -> Result<BootedVm> {
         entropy_divergence: true,  // default: inject CSPRNG per boot
         kernel_version,
         kernel_hash,
+        virtio_net: None,
     })
 }
 
@@ -4900,5 +5032,37 @@ mod tests {
 
         // VBIOS_REG_RFLAGS: bit 9 = IF (interrupts enabled)
         assert_eq!(VBIOS_REG_RFLAGS & 0x200, 0x200, "IF=1");
+    }
+
+    #[test]
+    fn test_virtio_net_pci_config_space() {
+        use std::cell::RefCell;
+        // Create a virtio-net device with null guest memory (PCI config
+        // reads don't need guest memory — only MMIO/vring operations do).
+        let virtio_net = RefCell::new(Box::new(VirtioNetPci::new(std::ptr::null_mut(), crate::arch::layout::VIRTIO_MMIO_ADDR as u32)));
+
+        // Vendor/Device ID (reg 0x00): 0x1af4:0x1000
+        let val = BootedVm::pci_config_read(0, 2, 0, 0x00, 0xCFC, 4, None, None, Some(&virtio_net));
+        assert_eq!(val, 0x10001af4, "vendor=0x1af4 device=0x1000");
+
+        // Class code (reg 0x08): 0x020000 = Ethernet
+        let val = BootedVm::pci_config_read(0, 2, 0, 0x08, 0xCFC, 4, None, None, Some(&virtio_net));
+        assert_eq!(val, 0x020000, "class=ethernet");
+
+        // BAR0 (reg 0x10): VIRTIO_MMIO_ADDR
+        let val = BootedVm::pci_config_read(0, 2, 0, 0x10, 0xCFC, 4, None, None, Some(&virtio_net));
+        assert_eq!(val, crate::arch::layout::VIRTIO_MMIO_ADDR as u32, "BAR0=mmio addr");
+
+        // Interrupt pin + line (reg 0x3C): pin A, line 11
+        let val = BootedVm::pci_config_read(0, 2, 0, 0x3C, 0xCFC, 4, None, None, Some(&virtio_net));
+        assert_eq!(val, (1u32 << 8) | 11, "INTx pin A=1, line=11");
+
+        // No virtio_net: interrupt line should return 0
+        let val = BootedVm::pci_config_read(0, 2, 0, 0x3C, 0xCFC, 4, None, None, None);
+        assert_eq!(val, 0, "no virtio-net: interrupt line = 0");
+
+        // Wrong bus (non-zero) returns 0xFFFFFFFF
+        let val = BootedVm::pci_config_read(1, 2, 0, 0x00, 0xCFC, 4, None, None, Some(&virtio_net));
+        assert_eq!(val, 0xFFFFFFFF, "non-zero bus returns all-ones");
     }
 }

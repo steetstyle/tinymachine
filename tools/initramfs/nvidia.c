@@ -636,7 +636,7 @@ static void fab_poll_dump(void)
   g_poll_dump_left--;
   for (i = 0; i < MAX_OFF0_MAPS; i++) {
     struct stub_vma_pages *mp = g_off0_maps[i];
-    unsigned long j, k;
+    unsigned long j;
     if (!mp || !mp->is_shm)
       continue;
     pr_info("stub: POLLDUMP vma=0x%lx npages=%lu",
@@ -822,7 +822,12 @@ static void stub_vma_close(struct vm_area_struct *vma)
     }
   } else if (p->is_shm && p->npages >= 1 && p->pages[0]) {
     unsigned long pi;
-    pr_info("stub: SHMDUMP npages=%lu", p->npages);
+    pr_info("stub: SHMDUMP npages=%lu flags=0x%lx%s",
+            p->npages,
+            p->vma ? (p->vma->vm_flags & (VM_SHARED | VM_WRITE | VM_MAYSHARE)) : 0UL,
+            p->vma ? "" : " (novma)");
+    if (p->vma)
+      pr_info("stub: SHMDUMPVMA vma=0x%lx size=0x%lx", p->vma->vm_start, p->vma->vm_end - p->vma->vm_start);
     for (pi = 0; pi < p->npages && pi < 6; pi++) {
       const u8 *v = p->pages[pi] ? page_address(p->pages[pi]) : NULL;
       unsigned long j;
@@ -858,9 +863,10 @@ static vm_fault_t stub_vma_fault(struct vm_fault *vmf)
   }
   if (p->is_shm && p->shm_logged < 2000) {
     p->shm_logged++;
-    pr_info("stub: SHMRD pid=%d addr=0x%lx off=0x%lx %s\n",
+    pr_info("stub: SHMRD pid=%d addr=0x%lx off=0x%lx %s fl=0x%lx\n",
             current->pid, vmf->address, off << PAGE_SHIFT,
-            (vmf->flags & FAULT_FLAG_WRITE) ? "WR" : "RD");
+            (vmf->flags & FAULT_FLAG_WRITE) ? "WR" : "RD",
+            vma->vm_flags & (VM_SHARED | VM_WRITE));
     if (vmf->flags & FAULT_FLAG_WRITE) {
       g_shm_pages = p;
       g_shm_written = true;
@@ -1014,6 +1020,15 @@ static int nvidia_mmap(struct file *file, struct vm_area_struct *vma) {
     vma->vm_ops = &stub_vm_ops;
     vma->vm_private_data = p;
     p->vma = vma;
+    /* v72: force VM_SHARED so WRITE faults map the page directly (no COW
+     * copy): the UMD's private shm mappings were COW'd at first write,
+     * so its channel writes (methods/pushbuffers/GET+PUT) landed in anon
+     * copies that died with the process — its map closed as zeros and
+     * cuCtxCreate=719 followed. With shared PTEs the writes persist in
+     * the stub's pages and stay visible on later reads. */
+    vm_flags_set(vma, VM_SHARED | VM_MAYSHARE);
+    pr_info("stub: MMAFFLAGS npages=%lu flags=0x%lx", npages,
+            vma->vm_flags & (VM_SHARED | VM_WRITE | VM_MAYSHARE));
     off0_map_add(p);
     return 0;
 fail:

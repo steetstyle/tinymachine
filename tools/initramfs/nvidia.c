@@ -446,7 +446,7 @@ static unsigned long g_shm_touched_max;
 static bool g_shm_written;
 static int g_shm_fab_prints;
 static bool g_fab_armed;
-static int g_zap_ticks;
+/* v71: PTE zap loop removed (see fab_work_fn) — g_zap_ticks dropped. */
 /* Pages written by the UMD (recorded on the FIRST write fault of each
  * page) + the in-page offset of that first write. The completion fence
  * for the current phase sits in one of these. Filling WHOLE pages
@@ -556,22 +556,13 @@ static void fab_work_fn(struct work_struct *ws)
         memcpy(v, host_ctl_65536, PAGE_SIZE);
     }
   }
-  /* Unmap the offset-0 vma PTEs every 5th fire so every poll read
-   * re-faults; the CTLRW/SHMRD fault logs then reveal the EXACT polled
-   * offsets. (handle-mem vmas sit at pgoff >= 0x5c00000, so pgoff 0..511
-   * only touches the offset-0 ctl/shm mappings.) */
-  g_zap_ticks++;
-  if ((g_zap_ticks % 5) == 0) {
-    for (i = 0; i < MAX_OFF0_MAPS; i++) {
-      struct stub_vma_pages *mp = g_off0_maps[i];
-      struct file *f;
-      if (!mp || !mp->vma || !(mp->is_ctl || mp->is_shm))
-        continue;
-      f = mp->vma->vm_file;
-      if (f && f->f_mapping)
-        unmap_mapping_pages(f->f_mapping, 0, 512, true);
-    }
-  }
+  /* v71: REMOVED the PTE zap loop (previously unmap_mapping_pages every
+   * 5th fire). The shm vma is a private mapping: after unmap the guest's
+   * re-fault lands in a COW copy, so the UMD's channel writes (methods,
+   * pushbuffers, GET/PUT at +0x40) got discarded — its maps closed as
+   * zeros and cuCtxCreate=719 followed. Content now persists in the
+   * pages; direct page_address writes (ctl re-arm, shm notify) remain
+   * visible without re-faulting. */
   for (i = 0; i < MAX_OFF0_MAPS; i++) {
     struct stub_vma_pages *mp = g_off0_maps[i];
     unsigned long j;
@@ -652,11 +643,15 @@ static void fab_poll_dump(void)
             mp->vma ? mp->vma->vm_start : 0UL, mp->npages);
     for (j = 0; j < mp->npages && j < 16; j++) {
       const u8 *v = mp->pages[j] ? page_address(mp->pages[j]) : NULL;
+      unsigned long k;
       if (!v)
         continue;
       printk(KERN_CONT "\n  pg%lu:", j);
-      for (k = 0; k < 0x400; k++)
+      for (k = 0; k < 0x400; k++) {
+        if (k % 64 == 0)
+          printk(KERN_CONT "\n   %03lx:", k);
         printk(KERN_CONT " %02x", v[k]);
+      }
     }
     printk(KERN_CONT "\n");
   }

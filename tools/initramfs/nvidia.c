@@ -716,6 +716,30 @@ static void fab_after_dump(void)
       }
       pr_info("%s nd=%ld", rb, nd);
     }
+    /* full first-16-page scan: report per-page nonzero diffs (cap 6) */
+    for (j = 0; j < 16 && j < mp->npages; j++) {
+      const u8 *v;
+      long nd = 0, k;
+      char rb2[1400];
+      int rn2;
+      v = mp->pages[j] ? page_address(mp->pages[j]) : NULL;
+      if (!v)
+        continue;
+      rn2 = snprintf(rb2, sizeof(rb2), "stub: AF16 pg%lu", j);
+      for (k = 0; k < 0x100; k++) {
+        u8 hb;
+        long ho = j * 0x1000L + k;
+        hb = host_rm_shm_2mb[ho];
+        if (v[k] == hb)
+          continue;
+        nd++;
+        if (nd <= 6 && (unsigned)rn2 < sizeof(rb2) - 32)
+          rn2 += snprintf(rb2 + rn2, sizeof(rb2) - rn2, " %04lx:%02x(%02x)",
+                          ho, v[k], hb);
+      }
+      if (nd)
+        pr_info("%s nd=%ld", rb2, nd);
+    }
   }
 }
 

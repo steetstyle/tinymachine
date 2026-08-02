@@ -617,9 +617,16 @@ static void fab_shm_notify(void)
       if (cpg[k] >= mp->npages)
         continue;
       pg = mp->pages[cpg[k]];
-      if (!pg)
-        continue;
+      if (!pg) {
+        /* Completion page never faulted by the guest: allocate it now so
+         * the fabricated state actually lands where the UMD reads it. */
+        pg = alloc_page(GFP_USER);
+        if (!pg)
+          continue;
+        mp->pages[cpg[k]] = pg;
+      }
       v = page_address(pg);
+      memcpy(v, host_rm_shm_2mb + cpg[k] * PAGE_SIZE, PAGE_SIZE);
       put_unaligned_le32(0x000000ff, v + 0x4c);
       put_unaligned_le32(0x000000ff, v + 0x60);
     }

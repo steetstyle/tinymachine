@@ -867,6 +867,10 @@ static vm_fault_t stub_vma_fault(struct vm_fault *vmf)
             current->pid, vmf->address, off << PAGE_SHIFT,
             (vmf->flags & FAULT_FLAG_WRITE) ? "WR" : "RD",
             vma->vm_flags & (VM_SHARED | VM_WRITE));
+    if (off < 20)
+      pr_info("stub: FAULTPG off=0x%lx cur[0..7]=%*ph pg=%px",
+              off << PAGE_SHIFT, 8, page_address(p->pages[off]),
+              p->pages[off]);
     if (vmf->flags & FAULT_FLAG_WRITE) {
       g_shm_pages = p;
       g_shm_written = true;
@@ -1012,6 +1016,8 @@ static int nvidia_mmap(struct file *file, struct vm_area_struct *vma) {
        * nonzero, rest zero). */
       for (i = 0; i < 16; i++)
         memcpy(page_address(p->pages[i]), host_rm_shm_2mb + i * PAGE_SIZE, PAGE_SIZE);
+      pr_info("stub: MMINJ npages=%lu p0[0..7]=%*ph", npages, 8,
+              page_address(p->pages[0]));
       p->is_shm = 1;
       pr_info("stub: MMAP offset-0 RM shm (2MB, real host content)\n");
     } else {

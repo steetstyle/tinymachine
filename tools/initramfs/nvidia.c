@@ -520,6 +520,7 @@ static void fab_open_file_del(struct file *f)
     }
   mutex_unlock(&g_open_mutex);
 }
+static void fab_after_dump(void);
 static void fab_work_fn(struct work_struct *ws)
 {
   int i;
@@ -591,6 +592,7 @@ static void fab_work_fn(struct work_struct *ws)
     }
   }
   mutex_unlock(&g_open_mutex);
+  fab_after_dump();
 }
 /* v68: CE completion notify for the channel-init shm submissions.
  * The UMD writes its submission records into the 2MB shm at
@@ -656,6 +658,48 @@ static void fab_poll_dump(void)
     printk(KERN_CONT "\n");
   }
 }
+static int g_afdump_left = 60;
+static void fab_after_dump(void)
+{
+  int i;
+  if (g_afdump_left <= 0)
+    return;
+  g_afdump_left--;
+  for (i = 0; i < MAX_OFF0_MAPS; i++) {
+    struct stub_vma_pages *mp = g_off0_maps[i];
+    unsigned long j, k;
+    static const unsigned int comp_pg[] = { 2, 5, 8, 11, 14 };
+    if (!mp)
+      continue;
+    if (mp->is_ctl) {
+      const u8 *v = mp->pages[0] ? page_address(mp->pages[0]) : NULL;
+      if (!v)
+        continue;
+      pr_info("stub: AFCTL n=%lu p0=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+              mp->npages, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
+              v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]);
+    }
+    if (!mp->is_shm || mp->npages != 512)
+      continue;
+    pr_info("stub: AFSHM vma=0x%lx", mp->vma ? mp->vma->vm_start : 0UL);
+    for (j = 0; j < ARRAY_SIZE(comp_pg); j++) {
+      const u8 *v;
+      if (comp_pg[j] >= mp->npages)
+        continue;
+      v = mp->pages[comp_pg[j]] ? page_address(mp->pages[comp_pg[j]]) : NULL;
+      if (!v)
+        continue;
+      printk(KERN_CONT "\n  cp%d:", comp_pg[j]);
+      for (k = 0; k < 0x80; k++) {
+        if (k % 16 == 0)
+          printk(KERN_CONT "\n   %02lx:", k);
+        printk(KERN_CONT " %02x", v[k]);
+      }
+    }
+    printk(KERN_CONT "\n");
+  }
+}
+
 static unsigned int nvidia_poll(struct file *file, poll_table *wait) {
   struct stub_file_event *s = file->private_data;
   unsigned int mask = 0;

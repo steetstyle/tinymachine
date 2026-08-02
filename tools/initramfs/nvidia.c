@@ -658,7 +658,7 @@ static void fab_poll_dump(void)
     printk(KERN_CONT "\n");
   }
 }
-static int g_afdump_left = 60;
+static int g_afdump_left = 40;
 static void fab_after_dump(void)
 {
   int i;
@@ -667,7 +667,7 @@ static void fab_after_dump(void)
   g_afdump_left--;
   for (i = 0; i < MAX_OFF0_MAPS; i++) {
     struct stub_vma_pages *mp = g_off0_maps[i];
-    unsigned long j, k;
+    unsigned long j, k, nr;
     static const unsigned int comp_pg[] = { 2, 5, 8, 11, 14 };
     if (!mp)
       continue;
@@ -684,19 +684,31 @@ static void fab_after_dump(void)
     pr_info("stub: AFSHM vma=0x%lx", mp->vma ? mp->vma->vm_start : 0UL);
     for (j = 0; j < ARRAY_SIZE(comp_pg); j++) {
       const u8 *v;
+      long nd = 0;
+      char rb[1600];
+      int rn;
       if (comp_pg[j] >= mp->npages)
         continue;
       v = mp->pages[comp_pg[j]] ? page_address(mp->pages[comp_pg[j]]) : NULL;
       if (!v)
         continue;
-      printk(KERN_CONT "\n  cp%d:", comp_pg[j]);
+      rn = snprintf(rb, sizeof(rb), "stub: AFD cp%d:", (int)comp_pg[j]);
       for (k = 0; k < 0x80; k++) {
-        if (k % 16 == 0)
-          printk(KERN_CONT "\n   %02lx:", k);
-        printk(KERN_CONT " %02x", v[k]);
+        u8 hb;
+        long ho = comp_pg[j] * 0x1000L + (long)k;
+        if (ho < 0 || ho >= (long)sizeof(host_rm_shm_2mb))
+          hb = 0;
+        else
+          hb = host_rm_shm_2mb[ho];
+        if (v[k] == hb)
+          continue;
+        nd++;
+        if (nd <= 20 && (unsigned)rn < sizeof(rb) - 32)
+          rn += snprintf(rb + rn, sizeof(rb) - rn, " %04lx:%02x(%02x)",
+                         ho, v[k], hb);
       }
+      pr_info("%s nd=%ld", rb, nd);
     }
-    printk(KERN_CONT "\n");
   }
 }
 

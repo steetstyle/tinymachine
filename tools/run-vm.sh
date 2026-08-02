@@ -72,7 +72,7 @@ if [ -z "$GPU_BDF" ] && [ "$VARIANT" != "minimal" ]; then
 fi
 
 # ── Kernel cmdline (MSI enabled) ──
-CMDLINE="pci=noearly acpi_irq_handling=off console=ttyS0 tinymachine.qemu=1"
+CMDLINE="pci=noearly acpi_irq_handling=off console=ttyS0 tinyos.qemu=1"
 
 if [ "$VARIANT" = "minimal" ]; then
     CMDLINE="$CMDLINE console=ttyS0"
@@ -93,7 +93,7 @@ QEMU_ARGS=(
 # ── VFIO GPU passthrough (skipped for 'minimal') ──
 if [ "$VARIANT" != "minimal" ] && [ -n "$GPU_BDF" ]; then
     # GPU function
-    QEMU_ARGS+=(-device vfio-pci,host="$GPU_BDF",x-msix-relocation=bar2)
+    QEMU_ARGS+=(-device vfio-pci,host="$GPU_BDF",x-msix-relocation=bar2,rombar=1)
 
     # GPU audio function (same device, function 1)
     GPU_DOM=$(echo "$GPU_BDF" | cut -d: -f1)

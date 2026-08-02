@@ -4,3 +4,14 @@ lib/
 cpython/
 __pycache__/
 # tinyos_nv_patch.py is now tracked (VFIO passthrough patches)
+# Stub driver build artifacts
+Kbuild
+*.ko
+*.mod
+*.mod.c
+*.o
+*.cmd
+Module.symvers
+modules.order
+libtrace_cuda.so
+init.bak

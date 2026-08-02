@@ -1,0 +1,10 @@
+obj-m += nvidia.o
+
+all:
+	make -C /tmp/tinymachine-kernel-build/linux-7.1.4 M=$(PWD) modules
+
+clean:
+	make -C /tmp/tinymachine-kernel-build/linux-7.1.4 M=$(PWD) clean
+
+install:
+	cp nvidia.ko /home/roy/github-projects/tinymachine/tools/initramfs/lib/modules/7.1.4/

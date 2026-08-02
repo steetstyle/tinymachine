@@ -740,7 +740,11 @@ impl SandboxBackend for FreshBootBackend {
                     // pcie_port_pm=off: disable PCIe port power management.
                     //   Known VFIO issue: GPU enters D3cold state after FLR and
                     //   MMIO accesses hang. Disabling port PM prevents this.
-                    Some(crate::arch::boot::build_kernel_cmdline(4, "pci=realloc pcie_port_pm=off"))
+                    // pci=biosirq: required so pcibios_enable_irq() reads the
+                    // Interrupt Line register we programmed during VBIOS POST
+                    // (PCI config offset 0x3C = IRQ 16). Without this, the
+                    // kernel can't find an IRQ for nvidia.ko's PCI probe.
+                    Some(crate::arch::boot::build_kernel_cmdline(4, "pci=realloc pcie_port_pm=off pci=biosirq pci=conf1 pci=nommconf"))
                 }
                 crate::variant::KernelProfile::GpuVk => {
                     // GpuVk (AMD/Vulkan): ACPI=y, no early PCI probe, no ACPI IRQ.
@@ -1086,6 +1090,19 @@ impl SandboxBackend for FreshBootBackend {
                         }
                         Err(e) => { eprintln!("[FRESHBOOT] BAR post-VBIOS restore FAILED: {e}"); }
                     }
+                    // Assign Interrupt Line (offset 0x3C) for INTx.
+                    // After VFIO FLR + VBIOS POST, the Interrupt Line register
+                    // is zero. nvidia.ko's PCI probe requires a valid IRQ number
+                    // (it fails with "can't find IRQ for PCI INT A" if none is set).
+                    // We assign IRQ 16 (a typical PCI GSI on IOAPIC).
+                    const INTX_IRQ: u8 = 16;
+                    let intx_off = cfg_off + 0x3C;
+                    unsafe { libc::pwrite(dev_fd, &INTX_IRQ as *const u8 as *const libc::c_void, 1, intx_off as i64); }
+                    // Read back to verify the write persisted through VFIO
+                    let mut verify: u8 = 0xFF;
+                    unsafe { libc::pread(dev_fd, &mut verify as *mut u8 as *mut libc::c_void, 1, intx_off as i64); }
+                    info!("FreshBoot: assigned INTx IRQ {} to GPU (PCI config offset 0x3C), read-back={}", INTX_IRQ, verify);
+
                     // Restore command register (re-enable Memory Space)
                     unsafe { libc::pwrite(dev_fd, &old_cmd as *const u32 as *const libc::c_void, 4, cmd_off as i64); }
                 }
@@ -1271,21 +1288,29 @@ impl SandboxBackend for FreshBootBackend {
         // before self.modules_loaded is mutated below.
         {
             let vfio_active = self.vfio.is_some();
-            let needs_modules = !self.modules_loaded
-                && self.variant.as_ref().map_or(false, |v| v.limits.gpu_required)
-                && !vfio_active;
+            let gpu_needed = self.variant.as_ref().map_or(false, |v| v.limits.gpu_required);
+            let needs_modules = !self.modules_loaded && gpu_needed;
+            tracing::info!("FreshBoot exec: vfio_active={vfio_active} gpu_needed={gpu_needed} modules_loaded={} needs_modules={needs_modules}",
+                self.modules_loaded);
 
             if needs_modules {
                 // SAFETY: BootedVm is in post-boot READY state, init polling for commands.
                 let booted = self.booted_mut()
                     .map_err(|_| ApiError::Unsupported("VM not available".into()))?;
 
-                // Load nvidia.ko so tinygrad's NVKIface backend can use it.
-                // This only runs when VFIO is NOT active (VFIO uses PCIIface).
-                // We use `!load-modules` which loads nvidia.ko with parameters
-                // that prevent it from re-initializing GSP or changing MSI/PCIe
-                // config that the host already manages.
-                info!("FreshBoot: loading nvidia.ko kernel module for non-VFIO GPU...");
+                // Load nvidia.ko so tinygrad can use the GPU.
+                // This runs for both VFIO and non-VFIO GPU variants.
+                //
+                // With VFIO, nvidia.ko inside the VM sees the GPU as a regular
+                // PCI device. Loading nvidia.ko powers up SEC2 and boots the
+                // GSP firmware, enabling NVKIface (RMAPI) and also making
+                // PCIIface work (SEC2/GSP engines are no longer power-gated).
+                //
+                // Without VFIO, nvidia.ko is the only path to GPU access.
+                //
+                // We use `!load-modules` which loads nvidia.ko with NVreg
+                // parameters compatible with VFIO passthrough.
+                info!("FreshBoot: loading nvidia.ko kernel module (VFIO={vfio_active})...");
                 // SAFETY: booted is in READY state (checked above).
                 let module_result = unsafe { booted.run_code("!load-modules") };
                 match module_result {

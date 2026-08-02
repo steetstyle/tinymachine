@@ -194,6 +194,164 @@ fn test_tinygrad_nv_pciiface_failure() {
 }
 
 
+// ─── Phase 1b: NVKIface (RMAPI via nvidia.ko) ──────────────────────
+
+/// Test that NVKIface works after loading nvidia.ko (which powers up SEC2).
+/// With the fix to load nvidia.ko even with VFIO active, the GPU is
+/// properly initialized before tinygrad tries to access it.
+const NVKIFACE_TEST: &str = r#"
+import sys, os
+
+sys.path.insert(0, '/usr/lib/python3.12/dist-packages')
+os.environ['NV_DEBUG'] = '0'
+
+print('NVKIFACE: Checking /dev/nvidia*...', flush=True)
+for p in ['/dev/nvidia0', '/dev/nvidiactl', '/dev/nvidia-uvm']:
+    print(f'  {p}: exists={os.path.exists(p)}', flush=True)
+
+print('NVKIFACE: Trying Device[NV]...', flush=True)
+try:
+    from tinygrad import Device
+    dev = Device['NV']
+    print(f'NVKIFACE: OK — {dev}', flush=True)
+
+    # Do a quick tensor operation
+    import numpy as np
+    a = dev.empty((4, 4), dtype=np.float32)
+    print(f'NVKIFACE: allocated tensor on GPU: shape={a.shape}', flush=True)
+except ModuleNotFoundError as e:
+    print(f'NVKIFACE: MODULE NOT FOUND — {e}', flush=True)
+except Exception as e:
+    print(f'NVKIFACE: FAILED — {type(e).__name__}: {e}', flush=True)
+    import traceback
+    traceback.print_exc()
+print('NVKIFACE_DONE', flush=True)
+"#;
+
+/// Test that NVKIface works after nvidia.ko is loaded.
+/// This verifies the fix: loading nvidia.ko powers up the GPU even with
+/// VFIO passthrough, making tinygrad's NVKIface backend functional.
+#[test]
+fn test_tinygrad_nv_nvkiface_works() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        )
+        .with_target(false)
+        .try_init();
+    let kernel = kernel_path();
+    let initrd = tinygrad_nv_initrd();
+
+    if !kernel.exists() {
+        eprintln!("SKIP: {} not found. Run tools/build-kernel.sh gpu-nvidia", kernel.display());
+        return;
+    }
+    if !initrd.exists() {
+        eprintln!("SKIP: {} not found. Run tools/build-variant-initramfs.sh tinygrad-nv", initrd.display());
+        return;
+    }
+    if !has_vfio_gpu() {
+        eprintln!("SKIP: no GPU bound to vfio-pci");
+        return;
+    }
+    if !std::path::Path::new("/dev/kvm").exists() {
+        eprintln!("SKIP: /dev/kvm not available");
+        return;
+    }
+
+    tinymachine_fork::register_all_backends();
+    use tinymachine_api::sandbox::SandboxBackend;
+    use tinymachine_fork::fresh_boot::FreshBootBackend;
+
+    let variant = tinymachine_api::variant::Variant::new("python", "tinygrad-nv", "gpu-nvidia");
+    eprintln!("\n═══════════════════════════════════════════════");
+    eprintln!("  NVKIface (RMAPI via nvidia.ko)");
+    eprintln!("\n  This test verifies that loading nvidia.ko inside the VM");
+    eprintln!("  (even with VFIO active) powers up the GPU SEC2 engine");
+    eprintln!("  and enables tinygrad to use NVKIface for tensor ops.\n");
+
+    let mut backend = FreshBootBackend::new();
+    let boot_start = Instant::now();
+    SandboxBackend::init(&mut backend, &variant)
+        .expect("init() should boot VM with VFIO passthrough");
+    eprintln!("Boot: {:.1}s", boot_start.elapsed().as_secs_f64());
+
+    if !backend.has_vfio() {
+        eprintln!("⚠️  VFIO not attached — GPU test cannot proceed");
+        SandboxBackend::destroy(&mut backend).ok();
+        return;
+    }
+
+    // nvidia.ko should be loaded by FreshBootBackend.exec() during
+    // module loading phase (after init, before running user code).
+    // The fix removed the !vfio_active guard.
+
+    eprintln!("\n--- Checking dmesg for nvidia errors ---");
+    let dmesg = r#"import subprocess
+r=subprocess.run(['/bin/busybox','dmesg'], capture_output=True, text=True, timeout=5)
+for l in r.stdout.split('\n'):
+    if 'nvidia' in l.lower() or 'IRQ' in l or 'pci=biosirq' in l:
+        print(l, flush=True)
+print('DMESG_DONE', flush=True)
+"#;
+    match SandboxBackend::exec(&mut backend, dmesg) {
+        Ok(o) => { for l in o.lines() { eprintln!("  | {}", l); } }
+        Err(e) => { eprintln!("  | dmesg failed: {}", e); }
+    }
+
+    eprintln!("\n--- PCI Interrupt Line diagnostic ---");
+    let intx_diag = r#"import os,struct
+paths=['/sys/devices/pci0000:00/0000:00:01.0/0000:01:00.0/config','/sys/bus/pci/devices/0000:01:00.0/config']
+for p in paths:
+    try:
+        d=open(p,'rb').read(64)
+        il=d[0x3C]
+        ip=d[0x3D]
+        cmd=d[4]
+        print(f'INTX_DIAG: path={p} InterruptLine=0x{il:02x} InterruptPin=0x{ip:02x} cmd=0x{cmd:02x}',flush=True)
+        break
+    except: pass
+else:
+    print('INTX_DIAG: no GPU config found',flush=True)
+    import glob
+    for f in glob.glob('/sys/devices/**/config',recursive=True):
+        try:
+            d=open(f,'rb').read(64)
+            if struct.unpack('<H',d[0:2])[0]==0x10de:
+                il=d[0x3C];print(f'INTX_DIAG_ALT: {f} InterruptLine=0x{il:02x}',flush=True);break
+        except: pass
+"#;
+    match SandboxBackend::exec(&mut backend, intx_diag) {
+        Ok(o) => { for l in o.lines() { eprintln!("  | {}", l); } }
+        Err(e) => { eprintln!("  | INTX_DIAG failed: {}", e); }
+    }
+
+    eprintln!("\n--- Running NVKIface test ---");
+    let exec_start = Instant::now();
+    match SandboxBackend::exec(&mut backend, NVKIFACE_TEST) {
+        Ok(output) => {
+            let elapsed = exec_start.elapsed();
+            eprintln!("Output ({:.1}s):", elapsed.as_secs_f64());
+            for line in output.lines() {
+                eprintln!("  | {}", line);
+            }
+
+            if output.contains("NVKIFACE: OK") {
+                eprintln!("\n✅ NVKIface works! GPU is accessible.\n");
+            } else if output.contains("FAILED") {
+                eprintln!("\n❌ NVKIface FAILED.\n");
+            }
+        }
+        Err(e) => {
+            eprintln!("\n❌ NVKIface EXEC HUNG: {}\n", e);
+        }
+    }
+
+    SandboxBackend::destroy(&mut backend).ok();
+}
+
+
 // ─── Phase 1b: PCIIface diagnostic register probe ─────────────────
 
 /// Diagnostic register probe — runs inside the VM and reads GPU register

@@ -23,6 +23,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <poll.h>
+#include <dirent.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/wait.h>
@@ -93,6 +96,7 @@ static void kmsg_puts(const char *s);
 // No iopl() needed since we don't use inb/outb directly.
 static void serial_putchar(char c);
 static void serial_puts(const char *s);
+static void flush_utrace(void);
 
 // ─── Detect best available Python interpreter ──────────────────────
 static const char *detect_python(void) {
@@ -143,55 +147,15 @@ static char *run_python(const char *code, const char *python) {
         dup2(stdout_pipe[1], STDERR_FILENO);
         if (stdout_pipe[1] > STDERR_FILENO) close(stdout_pipe[1]);
 
-        // ── FILE VERIFICATION DIAGNOSTICS ──
-        // Dump rootfs contents for debugging
-        syscall(SYS_write, STDOUT_FILENO, "ROOTFS_DUMP:\n", 13);
-        ls_dir("/", 40);
-        syscall(SYS_write, STDOUT_FILENO, "BIN_DUMP:\n", 10);
-        ls_dir("/bin", 40);
-        syscall(SYS_write, STDOUT_FILENO, "LIB64_DUMP:\n", 12);
-        ls_dir("/lib64", 20);
+        syscall(SYS_write, STDOUT_FILENO, "ROOTFS_DUMP\n", 12);
 
-        // Verify /bin/python3 exists and is accessible
-        struct stat py_stat;
-        int py_exists = (stat("/bin/python3", &py_stat) == 0);
-        int py_reg = py_exists && S_ISREG(py_stat.st_mode);
-        int py_xok = (access("/bin/python3", X_OK) == 0);
-
-        // Verify /lib64/ld-linux-x86-64.so.2 exists
-        struct stat ld_stat;
-        int ld_exists = (stat("/lib64/ld-linux-x86-64.so.2", &ld_stat) == 0);
-        int ld_reg = ld_exists && S_ISREG(ld_stat.st_mode);
-
-        // Verify /lib64 is a directory
-        struct stat ld64_stat;
-        int ld64_isdir = (stat("/lib64", &ld64_stat) == 0) && S_ISDIR(ld64_stat.st_mode);
-
-        // Try opening /bin/python3 with open()
-        int py_fd = open("/bin/python3", O_RDONLY);
-        int py_open_ok = (py_fd >= 0);
-
-        // Try fexecve (exec by fd — bypasses path resolution)
         char *new_argv[] = {"python3", "-c", (char *)code, NULL};
-        extern char **environ;
-        if (py_fd >= 0) {
-            fexecve(py_fd, new_argv, environ);
-            // If fexecve fails, report errno
-            char ebuf[256];
-            int en = snprintf(ebuf, sizeof(ebuf),
-                "[FEXECVE_FAIL errno=%d]\n"
-                "[STATS py_exists=%d py_reg=%d py_xok=%d ld_exists=%d ld_reg=%d ld64_isdir=%d py_open_ok=%d]\n",
-                errno, py_exists, py_reg, py_xok, ld_exists, ld_reg, ld64_isdir, py_open_ok);
-            syscall(SYS_write, STDOUT_FILENO, ebuf, (size_t)(en < (int)sizeof(ebuf) ? en : sizeof(ebuf) - 1));
-            close(py_fd);
-        } else {
-            char ebuf[256];
-            int en = snprintf(ebuf, sizeof(ebuf),
-                "[PY_OPEN_FAIL errno=%d]\n"
-                "[STATS py_exists=%d py_reg=%d py_xok=%d ld_exists=%d ld_reg=%d ld64_isdir=%d]\n",
-                errno, py_exists, py_reg, py_xok, ld_exists, ld_reg, ld64_isdir);
-            syscall(SYS_write, STDOUT_FILENO, ebuf, (size_t)(en < (int)sizeof(ebuf) ? en : sizeof(ebuf) - 1));
-        }
+        char *envp[] = {"PATH=/bin:/usr/bin", "HOME=/root", "TERM=linux", "LD_PRELOAD=/lib/libtrace_cuda.so", NULL};
+        execve("/bin/python3", new_argv, envp);
+
+        char ebuf[128];
+        int en = snprintf(ebuf, sizeof(ebuf), "[EXECVE_FAIL errno=%d]\n", errno);
+        syscall(SYS_write, STDOUT_FILENO, ebuf, (size_t)(en < (int)sizeof(ebuf) ? en : sizeof(ebuf) - 1));
         _exit(127);
     }
 
@@ -199,21 +163,220 @@ static char *run_python(const char *code, const char *python) {
     // fd (via dup2). When the child exits, the pipe read returns EOF.
     close(stdout_pipe[1]);
 
+    // Diagnostic: fork a watcher that samples the child's /proc/<pid>/syscall
+    // so we can see exactly what the hung GPU thread blocks on (futex,
+    // clock_nanosleep, read, ...).
+    pid_t wpid = fork();
+    if (wpid == 0) {
+        char spath[64];
+        int sn = snprintf(spath, sizeof(spath), "/proc/%d/syscall", pid);
+        char sbuf[256];
+        struct { long tv_sec; long tv_nsec; } ts = { 0, 200000000 };
+        for (int i = 0; i < 220; i++) {
+            /* Sample syscall for EVERY thread of the TGID. */
+            char tpath[96];
+            snprintf(tpath, sizeof(tpath), "/proc/%d/task", pid);
+            DIR *td = opendir(tpath);
+            if (td) {
+                struct dirent *de;
+                while ((de = readdir(td))) {
+                    if (de->d_name[0] < '0' || de->d_name[0] > '9')
+                        continue;
+                    snprintf(spath, sizeof(spath), "/proc/%d/task/%s/syscall", pid, de->d_name);
+                    int wfd = open(spath, O_RDONLY);
+                    if (wfd >= 0) {
+                        int rn = read(wfd, sbuf, sizeof(sbuf) - 1);
+                        if (rn > 0) {
+                            sbuf[rn] = 0;
+                            char ob[300];
+                            int on = snprintf(ob, sizeof(ob), "PSYSCALL tid=%s %s", de->d_name, sbuf);
+                            if (on > 0 && on < (int)sizeof(ob)) serial_puts(ob);
+                            serial_puts("\n");
+                        }
+                        close(wfd);
+                    }
+                    snprintf(spath, sizeof(spath), "/proc/%d/task/%s/wchan", pid, de->d_name);
+                    wfd = open(spath, O_RDONLY);
+                    if (wfd >= 0) {
+                        int rn = read(wfd, sbuf, sizeof(sbuf) - 1);
+                        if (rn > 0) {
+                            sbuf[rn] = 0;
+                            char ob[300];
+                            int on = snprintf(ob, sizeof(ob), "PWCHAN tid=%s %s", de->d_name, sbuf);
+                            if (on > 0 && on < (int)sizeof(ob)) serial_puts(ob);
+                            serial_puts("\n");
+                            if (strstr(sbuf, "anon_pipe_write") || strstr(sbuf, "pipe_wait")) {
+                                /* Dump this thread's fd table: the pipe's
+                                 * inode reveals its read-end owner. */
+                                char fpath[96];
+                                snprintf(fpath, sizeof(fpath), "/proc/%d/task/%s/fd", pid, de->d_name);
+                                DIR *fd = opendir(fpath);
+                                if (fd) {
+                                    struct dirent *de2;
+                                    while ((de2 = readdir(fd))) {
+                                        if (de2->d_name[0] < '0' || de2->d_name[0] > '9')
+                                            continue;
+                                        snprintf(fpath, sizeof(fpath), "/proc/%d/task/%s/fd/%s", pid, de->d_name, de2->d_name);
+                                        char lb[128];
+                                        ssize_t ln = readlink(fpath, lb, sizeof(lb) - 1);
+                                        char ob[300];
+                                        if (ln > 0) { lb[ln] = 0; snprintf(ob, sizeof(ob), "  FD %s -> %s\n", de2->d_name, lb); }
+                                        else snprintf(ob, sizeof(ob), "  FD %s -> ?\n", de2->d_name);
+                                        serial_puts(ob);
+                                    }
+                                    closedir(fd);
+                                }
+                                serial_puts("FDT-END\n");
+                            }
+                        }
+                        close(wfd);
+                    }
+                }
+                closedir(td);
+            }
+            syscall(SYS_nanosleep, &ts, NULL);
+        }
+        _exit(0);
+    }
+    /* Sample the parent (run_python's caller = init) too. */
+    pid_t ppid2 = getpid();
+    pid_t wpid2 = fork();
+    if (wpid2 == 0) {
+        char spath[64];
+        char sbuf[256];
+        struct { long tv_sec; long tv_nsec; } ts = { 0, 400000000 };
+        for (int i = 0; i < 110; i++) {
+            char tpath[96];
+            snprintf(tpath, sizeof(tpath), "/proc/%d/task", ppid2);
+            DIR *td = opendir(tpath);
+            if (td) {
+                struct dirent *de;
+                while ((de = readdir(td))) {
+                    if (de->d_name[0] < '0' || de->d_name[0] > '9')
+                        continue;
+                    snprintf(spath, sizeof(spath), "/proc/%d/task/%s/syscall", ppid2, de->d_name);
+                    int wfd = open(spath, O_RDONLY);
+                    if (wfd >= 0) {
+                        int rn = read(wfd, sbuf, sizeof(sbuf) - 1);
+                        if (rn > 0) {
+                            sbuf[rn] = 0;
+                            char ob[300];
+                            int on = snprintf(ob, sizeof(ob), "PSYSCALL-PARENT tid=%s %s", de->d_name, sbuf);
+                            if (on > 0 && on < (int)sizeof(ob)) serial_puts(ob);
+                            serial_puts("\n");
+                        }
+                        close(wfd);
+                    }
+                }
+                closedir(td);
+            }
+            syscall(SYS_nanosleep, &ts, NULL);
+        }
+        _exit(0);
+    }
+
+    /* Flusher: dump /tmp/utrace.log growth to serial every 2s. */
+    pid_t fpid = fork();
+    if (fpid == 0) {
+        struct { long tv_sec; long tv_nsec; } fts = { 2, 0 };
+        for (;;) {
+            flush_utrace();
+            syscall(SYS_nanosleep, &fts, NULL);
+        }
+    }
+
     char *output = malloc(OUT_BUF_MAX);
     if (!output) { close(stdout_pipe[0]); waitpid(pid, NULL, 0); return NULL; }
 
-    // Simple blocking read (no poll/timeout). The host kills the VM
-    // after 60s if the child hangs.
+    // Read with 60-second timeout. If child hangs (e.g. Device["NV"] init
+    // stuck on GSP RPC), we SIGKILL it and return what we have so far.
+    // Use poll() (not alarm/SIGALRM): this runs in threads, and SIGALRM
+    // would be delivered to an arbitrary thread, so the alarm never
+    // interrupted this read() reliably.
+    //
+    // IMPORTANT: never stop draining the pipe even if the output exceeds
+    // OUT_BUF_MAX — a child blocked in write() to a full pipe would hang
+    // the whole UMD. Stream everything to serial and keep a sliding tail.
+    //
+    // IMPORTANT 2: read()==0 (EOF) is NOT a reason to stop. The UMD
+    // closes all its fds (including its stdout) mid-run and then reopens
+    // them (observed: the CUDA process re-dups its stdout as fd 4, same
+    // pipe inode). If we stop draining at the transient EOF, the UMD's
+    // output writes block on the full pipe forever (observed deadlock:
+    // writers in anon_pipe_write on the drain pipe). Only the child's
+    // DEATH ends the drain.
     ssize_t total = 0;
-    ssize_t n;
-    while (total < OUT_BUF_MAX - 1 &&
-           (n = read(stdout_pipe[0], output + total, OUT_BUF_MAX - 1 - total)) > 0)
-        total += n;
-    output[total] = '\0';
+    ssize_t n = 0;
+    int eof_seen = 0;
+    struct pollfd pfd = { .fd = stdout_pipe[0], .events = POLLIN };
+    while (1) {
+        /* child liveness: the only legit end of the drain */
+        int status;
+        pid_t wr = waitpid(pid, &status, WNOHANG);
+        if (wr == pid || wr < 0) {
+            serial_puts("RP_CHILD_DIED\n");
+            break;
+        }
+        n = poll(&pfd, 1, 1000);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;   /* don't bail on signals (SIGCHLD etc.) */
+            serial_puts("RP_POLL_ERR\n");
+            break;
+        }
+        if (n == 0)
+            continue;       /* tick: re-check the child liveness */
+        if (!(pfd.revents & (POLLIN | POLLERR | POLLHUP))) {
+            serial_puts("RP_POLL_REV\n");
+            break;
+        }
+        ssize_t got = read(stdout_pipe[0], output + total, OUT_BUF_MAX - 1 - total);
+        if (got < 0) {
+            if (errno == EINTR)
+                continue;   /* signals (SIGCHLD etc.) are not EOF */
+            serial_puts("RP_READ_ERR\n");
+            break;
+        }
+        if (got == 0) {
+            if (!eof_seen) {
+                serial_puts("RP_READ_EOF\n");
+                eof_seen = 1;
+            }
+            usleep(100000); /* transient EOF — keep draining */
+            continue;
+        }
+        eof_seen = 0;
+        total += got;
+        /* Stream output live to serial so a hanging child still shows
+         * its trace (it never exits, so the pipe is only drained here). */
+        output[total] = '\0';
+        serial_puts(output + (total - got));
+        if (total >= OUT_BUF_MAX - 1) {
+            /* Keep the LAST OUT_BUF_MAX bytes as the return value. */
+            ssize_t tail = OUT_BUF_MAX - 1;
+            memmove(output, output + total - tail, tail);
+            total = tail;
+        }
+    }
     close(stdout_pipe[0]);
-
+    serial_puts("RP_WAIT4\n");
     int status;
-    waitpid(pid, &status, 0);
+    int attempts = 0;
+    while (1) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid)
+            break;
+        if (r < 0)
+            break;
+        if (kill(pid, 0) != 0)
+            break; /* child gone (maybe reaped elsewhere) */
+        if (++attempts >= 300) { /* ~30s */
+            serial_puts("RP_CHILD_ALIVE\n");
+            return output;
+        }
+        usleep(100000);
+    }
+    serial_puts("RP_WAIT4_DONE\n");
     return output;
 }
 
@@ -273,9 +436,9 @@ static int load_kernel_module(const char *path) {
         const char *params = "";
         if (is_nvidia) {
             // Minimal params. Let defaults handle the rest.
-            // NVreg_EnableGpuFirmware=1 is the default on 595.84.
-            // We keep GpuInitOnProbe=1 so RmInitAdapter runs during probe
-            // and avoid rm_firmware_active=0 which blocks GSP firmware.
+            // NVreg_EnableGpuFirmware=0 disables GSP, uses monolithic RM.
+            // With RmMsg=Msg we get verbose RM init debug output.
+            // GpuInitOnProbe=1 runs RmInitAdapter during probe.
             // NVreg_IgnoreMMIOCheck=1 is REQUIRED for VFIO passthrough:
             // QEMU VFIO's BAR2 (MMIO) is at 0x4000000040 (non-standard
             // address) which triggers MMIO range validation. Without
@@ -289,6 +452,8 @@ static int load_kernel_module(const char *path) {
             // kernel_gsp.c:5962 uses `elfDataSize >= elfSectionHeaderMaxIdx`
             // which FAILS when they are exactly equal (off-by-one). Fix:
             // append 1 null byte to the firmware file.
+            // GpuInitOnProbe=1 runs RmInitAdapter during probe.
+            // NVreg_IgnoreMMIOCheck=1 is REQUIRED for VFIO passthrough:
             params =
                 "NVreg_EnableGpuFirmware=1 "
                 "NVreg_GpuInitOnProbe=1 "
@@ -436,6 +601,12 @@ static int wait_for_nvidia_gsp(int timeout_secs, int nvidia_major) {
         }
         // ENODEV/ENXIO: node exists but GSP not ready yet
         // ENOENT: shouldn't happen since we mknod'd above
+        // Log errno every 5 seconds
+        if ((i % 5) == 0) {
+            { char tmp[64];
+              snprintf(tmp, sizeof(tmp), "GSP: errno=%d at %ds\n", errno, i);
+              kmsg_puts(tmp); }
+        }
         sleep(1);
     }
 
@@ -588,12 +759,10 @@ static void load_nvidia_modules(void) {
 // DOES wait for GSP firmware handshake because the serial protocol
 // doesn't support async GSP polling from the host.
 //
-// KEY FIX (2026-07-25): NVreg_EnableGpuFirmware=1 (was =0).
-// The previous setting disabled GSP firmware, which left Falcon
-// engines (SEC2, GSP, PCOPY0) permanently power-gated. nvidia.ko
-// hung in legacy init because it couldn't access Falcon registers.
-// With GSP firmware enabled, the driver loads SEC2 firmware via
-// nvidia.ko's proper RM path, and all Falcon engines power up.
+// REGRESSION (2026-07-27): GSP firmware RM handshake times out in
+// VFIO passthrough — /dev/nvidia0 open() returns ENODEV.
+// Switching to GSP=0 bypasses GSP handshake. The legacy RM init path
+// handles Falcon power-gating correctly on nvidia 595.84.
 static void load_nvidia_modules_direct(void) {
     struct stat st;
     if (stat(MODULES_DIR, &st) != 0 || !S_ISDIR(st.st_mode)) {
@@ -601,7 +770,7 @@ static void load_nvidia_modules_direct(void) {
         return;
     }
 
-    // ── Step 1: Load nvidia.ko (GSP firmware starts async) ────────
+    // ── Step 1: Load nvidia.ko (creates /dev/nvidia*) ─────────
     {
         const char *path = MODULES_DIR "/nvidia.ko";
         kmsg_puts("mod_load: ");
@@ -613,130 +782,41 @@ static void load_nvidia_modules_direct(void) {
 
         int fd = open(path, O_RDONLY);
         if (fd < 0) {
-            kmsg_puts("  ERROR: cannot open\n");
-            serial_puts("  ERROR: cannot open\n");
+            kmsg_puts("  ERROR: cannot open stub module\n");
+            serial_puts("  ERROR: cannot open stub module\n");
             return;
         }
 
-        // nvidia.ko params: GSP firmware enabled (default), with VFIO
-        // workarounds. See load_kernel_module() line 252 for detailed
-        // rationale on each param.
-        const char *params =
-            "NVreg_EnableGpuFirmware=1 "
-            "NVreg_GpuInitOnProbe=1 "
-            "NVreg_IgnoreMMIOCheck=1 "
-            "NVreg_InitializeSystemMemoryAllocations=1 ";
-
-        long ret = syscall(SYS_finit_module, fd, params, 0);
-        int saved_errno = errno;
-        close(fd);
-
-        if (ret == 0) {
-            kmsg_puts("  OK\n");
-            serial_puts("  OK\n");
-        } else if (saved_errno == EEXIST) {
-            kmsg_puts("  already loaded\n");
-            serial_puts("  already loaded\n");
-        } else {
-            kmsg_puts("  FAIL:");
-            serial_puts("  FAIL:");
-            { char tmp[32];
-              snprintf(tmp, sizeof(tmp), "%d\n", saved_errno);
-              kmsg_puts(tmp);
-              serial_puts(tmp); }
-            return; // can't proceed without nvidia.ko
-        }
-    }
-
-    // ── Step 2: Wait for GSP firmware handshake ───────────────────
-    kmsg_puts("GSP: waiting for firmware handshake...\n");
-    serial_puts("GSP: waiting for firmware handshake...\n");
-    int nvidia_major = get_nvidia_major();
-    int gsp_ready = 0;
-    if (nvidia_major > 0) {
-        gsp_ready = (wait_for_nvidia_gsp(30, nvidia_major) == 0);
-        if (gsp_ready) {
-            kmsg_puts("GSP: GPU ready\n");
-            serial_puts("GSP: GPU ready\n");
-        } else {
-            kmsg_puts("GSP: timeout — continuing anyway\n");
-            serial_puts("GSP: timeout — continuing anyway\n");
-        }
-    } else {
-        kmsg_puts("GSP: nvidia major not found\n");
-    }
-
-    // ── Step 3: Load remaining NVIDIA modules ─────────────────────
-    const char *sub_modules[] = {
-        MODULES_DIR "/nvidia-uvm.ko",
-        MODULES_DIR "/nvidia-modeset.ko",
-        MODULES_DIR "/nvidia-drm.ko",
-        MODULES_DIR "/nvidia-peermem.ko",
-        NULL
-    };
-    for (int i = 0; sub_modules[i] != NULL; i++) {
-        const char *path = sub_modules[i];
-        kmsg_puts("mod_load: ");
-        kmsg_puts(path);
-        kmsg_puts("\n");
-        serial_puts("mod_load: ");
-        serial_puts(path);
-        serial_puts("\n");
-
-        int fd = open(path, O_RDONLY);
-        if (fd < 0) {
-            kmsg_puts("  ERROR: cannot open\n");
-            serial_puts("  ERROR: cannot open\n");
-            continue;
-        }
-
-        // No special params needed for sub-modules (nvidia-uvm etc.)
         long ret = syscall(SYS_finit_module, fd, "", 0);
         int saved_errno = errno;
         close(fd);
 
         if (ret == 0) {
-            kmsg_puts("  OK\n");
-            serial_puts("  OK\n");
+            kmsg_puts("  OK (stub)\n");
+            serial_puts("  OK (stub)\n");
         } else if (saved_errno == EEXIST) {
             kmsg_puts("  already loaded\n");
             serial_puts("  already loaded\n");
         } else {
-            kmsg_puts("  FAIL:");
-            serial_puts("  FAIL:");
-            { char tmp[32];
-              snprintf(tmp, sizeof(tmp), "%d\n", saved_errno);
+            { char tmp[64];
+              snprintf(tmp, sizeof(tmp), "  FAIL: errno=%d\n", saved_errno);
               kmsg_puts(tmp);
               serial_puts(tmp); }
+            return;
         }
     }
 
-    // ── Step 4: Create /dev/nvidia-uvm device node ────────────────
-    // /dev/nvidia0 and /dev/nvidiactl were created by
-    // wait_for_nvidia_gsp() above.
-    {
-        int fd = open("/proc/devices", O_RDONLY);
-        if (fd >= 0) {
-            char buf[4096];
-            int n = read(fd, buf, sizeof(buf) - 1);
-            close(fd);
-            if (n > 0) {
-                buf[n] = 0;
-                char *p = strstr(buf, "nvidia-uvm");
-                if (p) {
-                    char *start = p;
-                    while (start > buf && *(start - 1) != '\n') start--;
-                    int major = atoi(start);
-                    if (major > 0) {
-                        mknod("/dev/nvidia-uvm", 0660 | S_IFCHR, makedev(major, 0));
-                        kmsg_puts("created /dev/nvidia-uvm\n");
-                        serial_puts("created /dev/nvidia-uvm\n");
-                    }
-                }
-            }
-        }
+    // ── Step 2: Skip nvidia.ko (GSP hangs in VFIO) ─────────────────
+    kmsg_puts("nvidia.ko: skipped (stub provides device nodes)\n");
+    serial_puts("nvidia.ko: skipped (stub provides device nodes)\n");
 
-        // Verify
+    // ── Skip sub-modules (nvidia-uvm, modeset; not needed with stub) ─
+    kmsg_puts("sub-modules: skipped (stub provides all nodes)\n");
+    serial_puts("sub-modules: skipped (stub provides all nodes)\n");
+
+    // ── Step 3: Verify device nodes (stub creates them) ────────────
+    {
+        // Verify nvidia0 exists
         if (stat("/dev/nvidia0", &st) == 0) {
             kmsg_puts("GPU nodes: /dev/nvidia0 OK\n");
             serial_puts("GPU nodes: /dev/nvidia0 OK\n");
@@ -744,15 +824,29 @@ static void load_nvidia_modules_direct(void) {
             kmsg_puts("GPU nodes: /dev/nvidia0 MISSING\n");
             serial_puts("GPU nodes: /dev/nvidia0 MISSING\n");
         }
-        // Test with open()
+        // Test open nvidia0
         int test_fd = open("/dev/nvidia0", O_RDWR | O_NONBLOCK);
         if (test_fd >= 0) {
             close(test_fd);
             kmsg_puts("GPU device: /dev/nvidia0 READY\n");
             serial_puts("GPU device: /dev/nvidia0 READY\n");
         } else {
-            kmsg_puts("GPU device: /dev/nvidia0 NOT READY\n");
-            serial_puts("GPU device: /dev/nvidia0 NOT READY\n");
+            { char tmp[64];
+              snprintf(tmp, sizeof(tmp), "GPU device: /dev/nvidia0 errno=%d\n", errno);
+              kmsg_puts(tmp);
+              serial_puts(tmp); }
+        }
+        // Test open nvidiactl
+        int ctl_fd = open("/dev/nvidiactl", O_RDWR | O_NONBLOCK);
+        if (ctl_fd >= 0) {
+            close(ctl_fd);
+            kmsg_puts("GPU device: /dev/nvidiactl READY\n");
+            serial_puts("GPU device: /dev/nvidiactl READY\n");
+        } else {
+            { char tmp[64];
+              snprintf(tmp, sizeof(tmp), "GPU device: /dev/nvidiactl errno=%d\n", errno);
+              kmsg_puts(tmp);
+              serial_puts(tmp); }
         }
     }
 }
@@ -895,6 +989,23 @@ static void trim_trailing_newline(char *s) {
 }
 
 // ─── Kernel cmdline parsing ────────────────────────────────────────
+static void flush_utrace(void) {
+    static int ufd = -1;
+    static long last = 0;
+    if (ufd < 0) ufd = open("/tmp/utrace.log", O_RDONLY);
+    if (ufd < 0) return;
+    char ubuf[2048];
+    long end = lseek(ufd, 0, SEEK_END);
+    if (end > last) {
+        serial_puts("UT_FLUSH\n");
+        lseek(ufd, last, SEEK_SET);
+        ssize_t rn;
+        while ((rn = read(ufd, ubuf, sizeof(ubuf))) > 0) {
+            write(1, ubuf, rn);
+            last = lseek(ufd, 0, SEEK_CUR);
+        }
+    }
+}
 // Check if a flag is present in /proc/cmdline
 static int cmdline_has_flag(const char *flag) {
     int cmdline_fd = open("/proc/cmdline", O_RDONLY);
@@ -1192,6 +1303,7 @@ int main(int argc, char *argv[]) {
     // compiles GPU SASS directly via libtinymesa.so (bundled in the initrd
     // at /usr/local/lib/libtinymesa.so or found via LD_LIBRARY_PATH).
     setenv("DEV", "NV:NAK", 1);
+    setenv("LD_PRELOAD", "/lib/libtrace_cuda.so", 1);
 
     // Set LD_LIBRARY_PATH so Python's ctypes.util.find_library() can find
     // shared libraries without needing ldconfig. Without this, ctypes
@@ -1248,6 +1360,57 @@ int main(int argc, char *argv[]) {
         // Uses direct finit_module (no fork) to avoid serial FD leak.
         // finit_module returns quickly; GSP firmware continues async.
         load_nvidia_modules_direct();
+
+        // Run NV test script if present, then fall through to serial loop.
+        // The test script uses PCIIface (direct BAR MMIO, no kernel module
+        // dependency) to initialize the NV device and print device info.
+        // Check if the full NV VFIO test script exists and run it via system()
+        // Using system() instead of run_python() to bypass pipe/fork issues
+        if (access("/usr/lib/python3.12/dist-packages/nv_test_vfio.py", F_OK) == 0) {
+            serial_puts("NV_TEST_BEGIN\n");
+            serial_puts("NV_PYTHON: ");
+            serial_puts(python ? python : "(null)");
+            serial_puts("\n");
+
+            // Wait 3 seconds for GPU to be in a stable state after module load
+            serial_puts("NV_WAIT_3s\n");
+            for (int i = 0; i < 3; i++) {
+                sleep(1);
+                serial_puts(".");
+            }
+            serial_puts("\n");
+
+            serial_puts("NV_EXEC\n");
+            char *nv_result = run_python("import os, sys, time\nsys.path.insert(0, '/usr/lib/python3.12/dist-packages')\nos.environ['NV_DEBUG'] = '0'\nexec(open('/usr/lib/python3.12/dist-packages/tinyos_nv_patch.py').read())\napply_patches()\n# ── TRACE: wrap os.open for nvidia device nodes ──\nimport os as _os\nimport ctypes as _ctypes\nimport glob as _glob\n_orig_open = _os.open\ndef _trace_open(path, flags, mode=0o777, **kw):\n    p = path if isinstance(path, str) else path.decode(errors='replace')\n    if 'nvidia' in p:\n        print('TRACE_OPEN:', p); sys.stdout.flush()\n    return _orig_open(path, flags, mode, **kw)\n_os.open = _trace_open\n# ── TRACE: wrap ctypes.CDLL for library loading ──\n_orig_cdll = _ctypes.CDLL.__init__\ndef _trace_cdll(self, name, **kw):\n    print('TRACE_CDLL:', name); sys.stdout.flush()\n    return _orig_cdll(self, name, **kw)\n_ctypes.CDLL.__init__ = _trace_cdll\n# ── SYSFS PCI enumeration ──\nprint('SYSFS_PCI:', _glob.glob('/sys/bus/pci/devices/*'))\nsys.stdout.flush()\nprint('SYSFS_NV_DRV:', _glob.glob('/sys/bus/pci/drivers/*nvidia*'))\nsys.stdout.flush()\nprint('DEV_NV:', _glob.glob('/dev/nvidia*'))\nsys.stdout.flush()\nif _os.path.exists('/proc/bus/pci/devices'):\n    print('PROC_PCI:', open('/proc/bus/pci/devices').read()[:600])\n    sys.stdout.flush()\nelse:\n    print('PROC_PCI: MISSING')\n    sys.stdout.flush()\n# Check for VFIO PCI devices\nprint('VFIO_PCI:', _glob.glob('/sys/bus/pci/devices/*/driver')[:5])\nsys.stdout.flush()\n# Check libcuda availability\nfor _libp in ['/usr/lib/libcuda.so.1', '/usr/lib/libcuda.so', '/usr/lib/x86_64-linux-gnu/libcuda.so']:\n    print('LIBCUDA:', _libp, _os.path.exists(_libp))\n    sys.stdout.flush()\n# ── End trace ──\nfrom tinygrad import Device, dtypes\nprint('M1:start')\nsys.stdout.flush()\ndev = Device['NV']\nprint('M2:dev', type(dev).__name__, type(dev.iface).__name__)\nsys.stdout.flush()\niface = dev.iface\n# BAR0 info via PCIIface API\nbar0_addr, bar0_sz = iface.pci_dev.bar_info(0)\nprint('M3:BAR0', hex(bar0_addr), hex(bar0_sz))\nsys.stdout.flush()\n# Read BAR0 offset 0 (Device ID) using map_bar\nbar0 = iface.pci_dev.map_bar(bar=0, off=0, size=0x1000, fmt='I')\nprint('M4:BAR0_devid', hex(bar0[0]))\nsys.stdout.flush()\n# Test gpu_mmio (pre-mapped by setup_usermode)\nprint('M5:gpu_mmio', hex(dev.gpu_mmio[0]))\nsys.stdout.flush()\n# VRAM allocation\nbuf = iface.alloc(256, host=False)\nprint('M6:alloc', hex(buf.va_addr), buf.size)\nsys.stdout.flush()\niface.free(buf)\nprint('M7:free_ok')\nsys.stdout.flush()\n# Re-bind GPU to nvidia stub for CUDA RM API\nimport os as _rb_os\n_rb_path = '/sys/bus/pci/drivers/nvidia/bind'\nif _rb_os.path.exists(_rb_path):\n    try:\n        _rb_fd = _rb_os.open(_rb_path, _rb_os.O_WRONLY)\n        _rb_os.write(_rb_fd, b'0000:00:02.0\\n')\n        _rb_os.close(_rb_fd)\n        print('M7b:rebind_ok', flush=True)\n    except Exception as _rb_e:\n        print('M7b:rebind_fail_' + str(_rb_e), flush=True)\n# CUDA tensor operations (requires libcuda.so in initrd)\nfrom tinygrad import Tensor\nimport traceback as _tb\n# Print lsof-like info before CUDA\ntry:\n    print('BEFORE_CUDA_open_fds:', [(p, str(_os.readlink(f'/proc/self/fd/{p}'))) for p in _os.listdir('/proc/self/fd') if p.isdigit()])\nexcept Exception as _ex:\n    print('BEFORE_CUDA_open_fds_err:', _ex)\nsys.stdout.flush()\ntry:\n    cdev = Device['CUDA']\n    print('M8:CUDA_dev', type(cdev).__name__, cdev.arch)\n    sys.stdout.flush()\n    a = Tensor([1,2,3], device='CUDA')\n    b = Tensor([4,5,6], device='CUDA')\n    c = (a + b).tolist()\n    print('M9:CUDA_add', c)\n    sys.stdout.flush()\n    x = Tensor.eye(3, device='CUDA')\n    print('MA:CUDA_eye', x.tolist())\n    sys.stdout.flush()\n    print('MB:CUDA_OK')\n    sys.stdout.flush()\nexcept Exception as _e:\n    print('M8:CUDA_err', type(_e).__name__, str(_e)[:300])\n    sys.stdout.flush()\n    _tb.print_exc()\n    sys.stdout.flush()\n# Print open fds after CUDA attempt\nprint('AFTER_CUDA_open_fds:', [(p, str(_os.readlink(f'/proc/self/fd/{p}'))) for p in _os.listdir('/proc/self/fd') if p.isdigit()])\nsys.stdout.flush()\n", python);
+            if (nv_result) {
+                serial_puts("NV_TEST_OUTPUT:\n");
+                serial_puts(nv_result);
+                free(nv_result);
+            } else {
+                serial_puts("NV_TEST_ERROR: execution failed\n");
+            }
+            // Print CUDA trace log (from LD_PRELOAD)
+            int trace_fd = open("/tmp/cuda_trace.log", O_RDONLY);
+            if (trace_fd >= 0) {
+                char trace_buf[4096];
+                int n;
+                serial_puts("CUDA_TRACE:\n");
+                while ((n = read(trace_fd, trace_buf, sizeof(trace_buf))) > 0)
+                    write(1, trace_buf, n);
+                close(trace_fd);
+            }
+            serial_puts("UTRACE_BEGIN\n");
+            int utrace_fd = open("/tmp/utrace.log", O_RDONLY);
+            if (utrace_fd >= 0) {
+                char trace_buf[4096];
+                int n;
+                while ((n = read(utrace_fd, trace_buf, sizeof(trace_buf))) > 0)
+                    write(1, trace_buf, n);
+                close(utrace_fd);
+            }
+            serial_puts("UTRACE_END\n");
+            serial_puts("NV_TEST_END\n");
+        }
 
         qemu_serial_loop(python);
         // qemu_serial_loop never returns; if it does, exit

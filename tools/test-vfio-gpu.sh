@@ -45,7 +45,7 @@ KERNEL_VERSION="${KERNEL_VERSION:-7.1.4}"
 KERNEL_BZIMAGE="${KERNEL_BUILD_DIR}/linux-${KERNEL_VERSION}/arch/x86/boot/bzImage"
 VARIANT="minimal"
 GPU_BDF=""
-TEST_MODE="quick"   # quick | nvidia-smi | cuda | interactive
+TEST_MODE="quick"   # quick | nvidia-smi | cuda | tinygrad | interactive
 INTERACTIVE=false
 SERIAL_DELAY=8  # seconds to wait before injecting code (UART FIFO flush)
 
@@ -65,7 +65,7 @@ Usage: ./test-vfio-gpu.sh [options]
 Options:
   --variant NAME     Initrd variant (default: minimal)
   --gpu BDF          GPU PCI address (default: auto-detect)
-  --test MODE        Test mode: quick | nvidia-smi | cuda | interactive
+  --test MODE        Test mode: quick | nvidia-smi | cuda | tinygrad | interactive
   --interactive      Drop into serial console (no code injection)
   --delay SECONDS    Serial injection delay (default: 8)
   --list-gpus        List VFIO-bound GPUs and exit
@@ -75,6 +75,7 @@ Test modes:
   quick        Check /dev/nvidia0 and /dev/nvidiactl exist (default)
   nvidia-smi   Run nvidia-smi inside guest (requires binary in initrd)
   cuda         Test NVML init via Python ctypes (requires libcuda in initrd)
+  tinygrad     Test direct PCI BAR access via tinygrad runtime
   interactive  Connect to serial console manually
 
 Examples:
@@ -132,13 +133,8 @@ detect_gpu() {
 
 # ─── Find GPU audio function ─────────────────────────────────────────
 get_gpu_audio_bdf() {
-    local bdf="$1"
-    local dom="${bdf%:*}"
-    dom="${dom%:*}"
-    local bus_func="${bdf##*:}"
-    local bus="${bus_func%.*}"
-    local func="${bus_func##*.}"
-    echo "${dom}:${bus}.1"
+    # BDF format: DDDD:BB:DD.F → replace function number with 1
+    echo "$1" | sed 's/\.[0-9]*$/.1/'
 }
 
 # ─── Check prerequisites ─────────────────────────────────────────────
@@ -262,6 +258,47 @@ else:
 print("=== nvidia-smi Check Complete ===")
 PYEOF
             ;;
+        tinygrad)
+            local __script__
+            __script__=$(cat << 'PYEOF'
+import os, sys, traceback, time
+sys.path.insert(0, '/usr/lib/python3.12/dist-packages')
+print("=== Tinygrad NVDev Test ===", flush=True)
+
+pf = "/usr/lib/python3.12/dist-packages/tinyos_nv_patch.py"
+if os.path.exists(pf):
+    exec(open(pf).read())
+    apply_patches()
+    print("P1: patches applied", flush=True)
+else:
+    print("P1: patch file not found", flush=True)
+    sys.exit(1)
+
+pci_devices = os.listdir("/sys/bus/pci/devices/")
+gpu = [d for d in pci_devices if open(f"/sys/bus/pci/devices/{d}/vendor").read().strip() == "0x10de"]
+if not gpu:
+    print("E1: No NVIDIA GPU found", flush=True)
+    sys.exit(1)
+gpu_bdf = gpu[0]
+print(f"D1: GPU at {gpu_bdf}", flush=True)
+
+from tinygrad.runtime.support.system import PCIDevice
+from tinygrad.runtime.support.nv.nvdev import NVDev
+print("D2: imports done", flush=True)
+
+pci = PCIDevice("nvidia", gpu_bdf)
+print(f"D3: PCIDevice ok, bar0_info={pci.bar_info(0)}", flush=True)
+
+nv = NVDev(pci)
+print(f"N1: chip={nv.chip_name}, fw={nv.fw_name}", flush=True)
+print(f"N2: vram={nv.vram_size>>20}MB, large_bar={nv.large_bar}", flush=True)
+print("\n=== NVDev Init OK ===", flush=True)
+PYEOF
+)
+            local __b64__
+            __b64__=$(echo "$__script__" | base64 -w0)
+            echo "import base64 as b; exec(b.b64decode('$__b64__'))"
+            ;;
     esac
 }
 
@@ -272,7 +309,7 @@ launch_vm() {
     gpu_audio=$(get_gpu_audio_bdf "$GPU_BDF")
 
     # Kernel cmdline — tinyos.qemu=1 triggers auto module loading + serial mode
-    local cmdline="console=ttyS0,115200n8 root=/dev/ram0 quiet tinyos.qemu=1"
+    local cmdline="console=ttyS0,115200n8 root=/dev/ram0 ignore_loglevel pci=noearly acpi_irq_handling=off tinyos.qemu=1"
 
     info "Launching QEMU (variant=${VARIANT}, gpu=${GPU_BDF})..."
 
@@ -282,15 +319,15 @@ launch_vm() {
         info "  (Python commands are run via init's serial loop)"
         echo ""
         exec qemu-system-x86_64 \
-            -machine type=q35,accel=kvm \
+            -machine type=q35,accel=kvm,kernel_irqchip=split \
             -cpu host,migratable=off \
             -smp "$(nproc)" \
             -m 3.5G \
             -kernel "$KERNEL_BZIMAGE" \
             -initrd "$initrd" \
             -append "$cmdline" \
-            -device vfio-pci,host="$GPU_BDF",rombar=0,x-no-mmap=on \
-            -device vfio-pci,host="$gpu_audio",rombar=0,x-no-mmap=on \
+            -device vfio-pci,host="$GPU_BDF",rombar=0 \
+            -device vfio-pci,host="$gpu_audio",rombar=0 \
             -nographic \
             -serial stdio \
             -no-reboot \
@@ -307,25 +344,25 @@ launch_vm() {
 
         # Run QEMU with serial code injection via stdin
         # The sleep+echo pipeline delivers code after UART is initialized
-        timeout 35 bash -c '
+        timeout 150 bash -c '
             sleep '"$SERIAL_DELAY"'
             echo '"'$test_code'"'
         ' | qemu-system-x86_64 \
-            -machine type=q35,accel=kvm \
+            -machine type=q35,accel=kvm,kernel_irqchip=split \
             -cpu host,migratable=off \
             -smp "$(nproc)" \
             -m 3.5G \
             -kernel "$KERNEL_BZIMAGE" \
             -initrd "$initrd" \
             -append "$cmdline" \
-            -device vfio-pci,host="$GPU_BDF",rombar=0,x-no-mmap=on \
-            -device vfio-pci,host="$gpu_audio",rombar=0,x-no-mmap=on \
+            -device vfio-pci,host="$GPU_BDF",rombar=0 \
+            -device vfio-pci,host="$gpu_audio",rombar=0 \
             -nographic \
             -serial stdio \
             -no-reboot \
             -nodefaults \
             -no-user-config \
-            2>&1 | grep -E "(===|✅|❌|nvidia|mod_load|GPU|OK|FAIL|init:|Kernel panic|Call Trace|DONE|READY)" | head -30
+            2>&1 | grep -E "(===|nvidia|mod_load|GPU|OK|FAIL|init:|Kernel panic|Call Trace|DONE|READY|BAR[012]|mmap|Config\[|P[0-9]|D[0-9]|N[0-9]|Traceback)"
     fi
 }
 

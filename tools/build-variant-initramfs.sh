@@ -490,6 +490,13 @@ done
 SHELLINIT
         chmod +x "$TEMP_ROOT/init"
     }
+    # Also compile NV probe binary (dynamically linked, includes libcuda dlopen)
+    NV_PROBE_SRC="$SCRIPT_DIR/initramfs/nv_probe.c"
+    if [ -f "$NV_PROBE_SRC" ]; then
+        echo "Compiling NV probe binary..."
+        gcc -O2 -s -o "$TEMP_ROOT/bin/nv_probe" "$NV_PROBE_SRC" -ldl 2>&1 || echo "WARNING: NV probe compilation failed"
+        ls -lh "$TEMP_ROOT/bin/nv_probe" 2>/dev/null || true
+    fi
 else
     echo "ERROR: init.c not found at $INIT_C_SRC"
     exit 1
@@ -558,6 +565,11 @@ if [ -f "$FFI_LIB" ]; then
     cp -L "$FFI_LIB" "$TEMP_ROOT/lib/libffi.so.8" 2>/dev/null && echo "Added libffi.so.8 ($(du -sh "$TEMP_ROOT/lib/libffi.so.8" | cut -f1))"
 fi
 
+# libtrace_cuda.so: LD_PRELOAD wrapper for CUDA syscall tracing
+if [ -f "$SCRIPT_DIR/initramfs/lib/libtrace_cuda.so" ]; then
+    cp "$SCRIPT_DIR/initramfs/lib/libtrace_cuda.so" "$TEMP_ROOT/lib/libtrace_cuda.so" 2>/dev/null && echo "Added libtrace_cuda.so ($(du -sh "$TEMP_ROOT/lib/libtrace_cuda.so" | cut -f1))"
+fi
+
 # ── Step 6: NVIDIA kernel modules + firmware (GPU variants) ──
 # For GPU passthrough, the guest needs kernel modules + GSP firmware blobs.
 NVIDIA_MODULES_SRC="$SCRIPT_DIR/initramfs/lib/modules"
@@ -618,6 +630,38 @@ if [ "$VARIANT" = "pytorch-nv" ] || [ "$VARIANT" = "tinygrad-nv" ]; then
         echo "    Run: tools/download-nv-firmware.sh"
     fi
 
+    # ── 595.84 GSP firmware (nvidia.ko v595.84 firmware request) ──
+    # nvidia.ko 595.84 requests nvidia/595.84/gsp_ga10x.bin on load.
+    # Without it, RmFetchGspRmImages fails and probe returns -1.
+    if [ -f "$NVIDIA_FIRMWARE_SRC/nvidia/595.84/gsp_ga10x.bin" ]; then
+        echo "  Copying 595.84 GSP firmware from fallback source..."
+        mkdir -p "$TEMP_ROOT/lib/firmware/nvidia/595.84"
+        cp "$NVIDIA_FIRMWARE_SRC/nvidia/595.84/gsp_ga10x.bin" \
+            "$TEMP_ROOT/lib/firmware/nvidia/595.84/gsp_ga10x.bin"
+        echo "    -> $(du -h "$TEMP_ROOT/lib/firmware/nvidia/595.84/gsp_ga10x.bin" | cut -f1)"
+    else
+        echo "  WARNING: No 595.84 GSP firmware found. nvidia.ko RMAPI may fail."
+    fi
+
+    # Also copy 595.71.05 firmware (needed for fallback nvidia.ko version)
+    if [ -d "$NVIDIA_FIRMWARE_SRC/nvidia/595.71.05" ]; then
+        echo "  Copying 595.71.05 GSP firmware..."
+        mkdir -p "$TEMP_ROOT/lib/firmware/nvidia/595.71.05"
+        # Need to append a null byte to fix off-by-one ELF section header check
+        # in kernel_gsp.c:5961 (elfDataSize >= elfSectionHeaderMaxIdx fails when equal).
+        cp "$NVIDIA_FIRMWARE_SRC/nvidia/595.71.05/gsp_ga10x.bin" \
+            "$TEMP_ROOT/lib/firmware/nvidia/595.71.05/gsp_ga10x.bin"
+        # Append null byte if not already present (fixes ELF off-by-one)
+        fwsize=$(stat -c%s "$TEMP_ROOT/lib/firmware/nvidia/595.71.05/gsp_ga10x.bin")
+        lastbyte=$(tail -c1 "$TEMP_ROOT/lib/firmware/nvidia/595.71.05/gsp_ga10x.bin" | xxd -p)
+        if [ "$lastbyte" != "00" ]; then
+            printf '\x00' >> "$TEMP_ROOT/lib/firmware/nvidia/595.71.05/gsp_ga10x.bin"
+            echo "    -> padded with null byte ($((fwsize+1)) bytes)"
+        else
+            echo "    -> $fwsize bytes (already ends with null)"
+        fi
+    fi
+
     # ── AD104 booter/bootloader firmware (tinygrad direct GSP) ──
     # These are small firmware files (~93KB total) that tinygrad's NV backend
     # loads directly into SEC2 Falcon via MMIO to boot the GSP.
@@ -640,20 +684,20 @@ if [ "$VARIANT" = "pytorch-nv" ] || [ "$VARIANT" = "tinygrad-nv" ]; then
     echo "  Firmware: $(find "$TEMP_ROOT/lib/firmware/nvidia" -type f | wc -l) files"
     echo "  Size: $(du -sh "$TEMP_ROOT/lib/firmware" | cut -f1)"
 
-    # ── Step 6.3: CUDA userspace driver libraries (pytorch-nv variant) ──
-    # For the pytorch-nv variant with nvidia.ko loaded in guest, we include
+    # ── Step 6.3: CUDA userspace driver libraries (GPU variants) ──
+    # For GPU variants with nvidia.ko loaded in guest, we include
     # the host's CUDA driver libraries so that libcuda.so is available.
-    # Note: CUDA Toolkit (libcudart, libcublas, libnvrtc) is NOT on the host,
-    # so pytorch GPU compute remains CPU-only for now. The driver libraries
-    # enable nvidia-smi and basic CUDA driver API calls in the guest.
-    if [ "$VARIANT" = "pytorch-nv" ]; then
+    # libcuda.so has a built-in PTX JIT compiler, so tensor operations
+    # work without nvcc/nvrtc/nvjitlink — PTXRenderer + PTXCompiler
+    # pass PTX text directly to cuModuleLoadData, which JIT-compiles to SASS.
+    if [ "$VARIANT" = "pytorch-nv" ] || [ "$VARIANT" = "tinygrad-nv" ]; then
         CUDA_LIBS_SRC="/usr/lib/x86_64-linux-gnu"
-        echo "Adding CUDA driver libraries for pytorch variant..."
-        mkdir -p "$TEMP_ROOT/usr/lib/x86_64-linux-gnu"
+        echo "Adding CUDA driver libraries for GPU variant..."
+        mkdir -p "$TEMP_ROOT/usr/lib"
         for lib_pattern in "libcuda.so*" "libnvidia-ml.so*" "libnvidia-ptxjitcompiler.so*"; do
             for f in $CUDA_LIBS_SRC/$lib_pattern; do
                 if [ -f "$f" ] && [ ! -L "$f" ]; then
-                    target="$TEMP_ROOT/usr/lib/x86_64-linux-gnu/$(basename "$f")"
+                    target="$TEMP_ROOT/usr/lib/$(basename "$f")"
                     if [ ! -f "$target" ]; then
                         cp -L "$f" "$target" 2>/dev/null || true
                     fi
@@ -661,16 +705,38 @@ if [ "$VARIANT" = "pytorch-nv" ] || [ "$VARIANT" = "tinygrad-nv" ]; then
             done
         done
         # Create symlinks (libcuda.so → libcuda.so.1 → libcuda.so.595.84)
-        if [ -f "$TEMP_ROOT/usr/lib/x86_64-linux-gnu/libcuda.so.595.84" ]; then
-            ln -sf libcuda.so.595.84 "$TEMP_ROOT/usr/lib/x86_64-linux-gnu/libcuda.so.1"
-            ln -sf libcuda.so.1 "$TEMP_ROOT/usr/lib/x86_64-linux-gnu/libcuda.so"
+        # NOTE: c.DLL.findlib manually iterates /usr/lib/, /usr/lib64/, /usr/local/lib/
+        # It does NOT search /usr/lib/x86_64-linux-gnu/. Hence install in /usr/lib/.
+        if [ -f "$TEMP_ROOT/usr/lib/libcuda.so.595.84" ]; then
+            ln -sf libcuda.so.595.84 "$TEMP_ROOT/usr/lib/libcuda.so.1"
+            ln -sf libcuda.so.1 "$TEMP_ROOT/usr/lib/libcuda.so"
         fi
-        if [ -f "$TEMP_ROOT/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.595.84" ]; then
-            ln -sf libnvidia-ml.so.595.84 "$TEMP_ROOT/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1"
-            ln -sf libnvidia-ml.so.1 "$TEMP_ROOT/usr/lib/x86_64-linux-gnu/libnvidia-ml.so"
+        if [ -f "$TEMP_ROOT/usr/lib/libnvidia-ml.so.595.84" ]; then
+            ln -sf libnvidia-ml.so.595.84 "$TEMP_ROOT/usr/lib/libnvidia-ml.so.1"
+            ln -sf libnvidia-ml.so.1 "$TEMP_ROOT/usr/lib/libnvidia-ml.so"
         fi
-        echo "  CUDA libs: $(du -sh "$TEMP_ROOT/usr/lib/x86_64-linux-gnu" | cut -f1)"
-        echo "  $(find "$TEMP_ROOT/usr/lib/x86_64-linux-gnu" -name 'libcuda*' -o -name 'libnvidia*' | wc -l) files"
+        echo "  CUDA libs: $(du -sh "$TEMP_ROOT/usr/lib" | cut -f1)"
+        echo "  $(find "$TEMP_ROOT/usr/lib" -maxdepth 1 -name 'libcuda*' -o -name 'libnvidia*' | wc -l) files"
+
+        # Resolve ldd dependencies for CUDA libs (libpthread.so.0, etc.)
+        echo "  Resolving CUDA lib dependencies via ldd..."
+        for _cuda_lib in "$TEMP_ROOT/usr/lib/libcuda.so"* "$TEMP_ROOT/usr/lib/libnvidia"*; do
+            [ -f "$_cuda_lib" ] || continue
+            for _dep in $(ldd "$_cuda_lib" 2>/dev/null | grep "=> /" | awk '{print $3}'); do
+                _depname=$(basename "$_dep")
+                _depdir="/lib/x86_64-linux-gnu"
+                if echo "$_dep" | grep -q "^/lib/"; then
+                    _depdir="/lib"
+                else
+                    _depdir=$(dirname "$_dep")
+                fi
+                mkdir -p "$TEMP_ROOT$_depdir"
+                if [ ! -f "$TEMP_ROOT$_depdir/$_depname" ] && [ -f "$_dep" ]; then
+                    cp -L "$_dep" "$TEMP_ROOT$_depdir/$_depname"
+                    echo "    $_depname"
+                fi
+            done
+        done
     fi
 
     # ── NAK GPU kernel compiler (tinymesa) ──
@@ -777,6 +843,34 @@ if [ "$VARIANT" = "tinygrad-nv" ] || [ "$VARIANT" = "pytorch-nv" ]; then
         "$FIRMWARE_BASE/ad102/gsp/bootloader-570.144.bin"
     decompress_fw "/lib/firmware/nvidia/ga102/gsp/gsp-570.144.bin.zst" \
         "$FIRMWARE_BASE/ga102/gsp/gsp-570.144.bin"
+
+    # ── tinyos_nv_patch.py for VFIO passthrough workarounds ──
+    # The patch file provides runtime monkey-patches for tinygrad's NV backend
+    # when running in a QEMU/KVM VFIO passthrough guest. It handles:
+    #   - SEC2 Falcon power-gating (AD104+)
+    #   - wait_cond counter fallback (KVM timer issues)
+    #   - fetch_fw local path lookup
+    #   - FUSE-version-based booter signature selection
+    cp "$SCRIPT_DIR/initramfs/tinyos_nv_patch.py" \
+        "$TEMP_ROOT/usr/lib/python$PY_VER/dist-packages/tinyos_nv_patch.py"
+    echo "  tinyos_nv_patch.py copied for VFIO passthrough workarounds"
+
+    # NV test script for automated VFIO testing (runs from init.c after module load)
+    if [ -f "$SCRIPT_DIR/initramfs/nv_test_vfio.py" ]; then
+        cp "$SCRIPT_DIR/initramfs/nv_test_vfio.py" \
+            "$TEMP_ROOT/usr/lib/python$PY_VER/dist-packages/nv_test_vfio.py"
+        echo "  nv_test_vfio.py copied for automated NV test"
+    fi
+
+    # ── nvidia.ko (v595.84) GSP firmware ──
+    # The nvidia.ko kernel module requests firmware via request_firmware()
+    # at paths nvidia/595.84/gsp_ga10x.bin and nvidia/595.84/gsp_tu10x.bin.
+    # These must exist at the exact versioned path expected by the module.
+    if [ -d "$NVIDIA_FIRMWARE_SRC/nvidia/595.84" ]; then
+        echo "  Copying nvidia.ko firmware (595.84) for RMAPI..."
+        cp -r "$NVIDIA_FIRMWARE_SRC/nvidia/595.84" "$FIRMWARE_BASE/"
+        echo "    -> $(du -sh "$FIRMWARE_BASE/595.84" | cut -f1)"
+    fi
 fi  # end GPU-only firmware block
 
 # ── Step 6.6: Add /usr/bin/clang stub (GPU variants only) ──

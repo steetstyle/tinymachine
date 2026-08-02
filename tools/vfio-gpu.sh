@@ -115,8 +115,8 @@ cmd_launch() {
     mkdir -p /tmp/vfio-gpu
     local LOG="/tmp/vfio-gpu/launch-$(date +%s).log"
 
-    # Python kodu (MicroPython uyumlu)
-    PYCODE='import os; f=os.listdir("/dev"); print("nvidia0="+str("nvidia0" in f)); print("nvidiactl="+str("nvidiactl" in f)); print("nvidia-uvm="+str("nvidia-uvm" in f)); print("DONE")'
+    # Python kodu — dumped onto the serial console after READY
+    PYCODE="exec(open('/root/test_cuda.py').read())"
 
     timeout $((SERIAL_DELAY + 35)) bash -c '
         sleep '"$SERIAL_DELAY"'
@@ -128,13 +128,13 @@ cmd_launch() {
         -m 3.5G \
         -kernel "$KERNEL" \
         -initrd "$INITRD" \
-        -append "console=ttyS0,115200n8 root=/dev/ram0 quiet tinyos.qemu=1" \
+        -append "console=ttyS0,115200n8 root=/dev/ram0 tinyos.qemu=1 loglevel=8 CP_BEFORE_RUN_PYTHON=/root/test_cuda.py" \
         $QEMU_EXTRA \
         -device vfio-pci,host="$GPU_BDF",rombar=0 \
         -device vfio-pci,host="$AUDIO_BDF",rombar=0 \
         -nographic -display none -serial stdio \
         -no-reboot -nodefaults -no-user-config \
-        2>&1 | tee "$LOG" | grep -E "(nvidia0=|nvidiactl=|DONE|GPU nodes|Error|Xid|-22|Call Trace)" | head -20
+        2>&1 | tee "$LOG"
 
     echo ""
     ok "Log: $LOG"

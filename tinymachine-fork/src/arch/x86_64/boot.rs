@@ -881,7 +881,7 @@ impl BootedVm {
                 let offset = (reg + (port & 3) as u32) as u16;
                 let len = (4 - (port & 3) as usize).min(_size);
                 let val = vfio_dev.config_read(offset, len);
-                if offset >= 0x10 && offset <= 0x28 {
+                if offset != 0x04 {
                     eprintln!("[BOOT] pci_config_read GPU BDF {:02x}:{}.{} reg=0x{offset:02x} len={len} => 0x{val:08x}",
                         bus, dev, func);
                 }
@@ -2337,7 +2337,7 @@ fn pci_config_read_inline(
                 for i in 0..size.min(4) {
                     val |= (buf[i] as u32) << (i * 8);
                 }
-                if reg >= 0x10 && reg <= 0x28 {
+                if reg != 0x04 {
                     eprintln!("[VBIOS-read] pci_config_read_inline BDF {:02x}:{:02x}.{} reg=0x{reg:02x} size={size} => 0x{val:08x}",
                         bus, dev, func);
                 }
